@@ -81,18 +81,14 @@ class MultiTaskPerceptionModel(nn.Module):
         )
 
         # --- Localisation head ---
-        self.loc_head = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(512 * 7 * 7, 1024),
-            nn.BatchNorm1d(1024),
+        self.loc_conv_head = nn.Sequential(
+            nn.Conv2d(512, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            CustomDropout(p=0.5),
-            nn.Linear(1024, 256),
-            nn.BatchNorm1d(256),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            CustomDropout(p=0.5),
-            nn.Linear(256, 4),
-            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1)),
         )
 
         # --- Segmentation decoder (U-Net expansive path) ---
