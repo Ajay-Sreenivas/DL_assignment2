@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from sklearn.metrics import f1_score
+from tqdm import tqdm
 import wandb
 
 from data.pets_dataset import OxfordIIITPetDataset
@@ -24,7 +26,7 @@ from models import (
     VGG11UNet,
     MultiTaskPerceptionModel,
 )
-from losses.iou_loss import IoULoss
+from losses.iou_loss import IoULoss, CombinedLocLoss
 
 
 # ---------------------------------------------------------------------------
@@ -39,12 +41,12 @@ class DiceLoss(nn.Module):
         self.eps = eps
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        probs = torch.softmax(logits, dim=1)  # [B, C, H, W]
+        probs = torch.softmax(logits, dim=1)
         targets_oh = torch.zeros_like(probs)
-        targets_oh.scatter_(1, targets.unsqueeze(1), 1)  # one-hot
+        targets_oh.scatter_(1, targets.unsqueeze(1), 1)
         dims = (0, 2, 3)
         intersection = (probs * targets_oh).sum(dims)
-        cardinality   = (probs + targets_oh).sum(dims)
+        cardinality  = (probs + targets_oh).sum(dims)
         dice = (2.0 * intersection + self.eps) / (cardinality + self.eps)
         return 1.0 - dice.mean()
 
@@ -79,20 +81,20 @@ def compute_iou(pred_boxes: torch.Tensor, target_boxes: torch.Tensor, eps: float
     ix1 = torch.max(px1, tx1); ix2 = torch.min(px2, tx2)
     iy1 = torch.max(py1, ty1); iy2 = torch.min(py2, ty2)
     inter = (ix2 - ix1).clamp(0) * (iy2 - iy1).clamp(0)
-    pa = (px2 - px1).clamp(0) * (py2 - py1).clamp(0)
-    ta = (tx2 - tx1).clamp(0) * (ty2 - ty1).clamp(0)
+    pa    = (px2 - px1).clamp(0) * (py2 - py1).clamp(0)
+    ta    = (tx2 - tx1).clamp(0) * (ty2 - ty1).clamp(0)
     union = pa + ta - inter + eps
     return (inter / union).mean().item()
 
 
 def dice_score(logits: torch.Tensor, targets: torch.Tensor, num_classes: int = 3, eps: float = 1e-6):
-    preds = logits.argmax(dim=1)  # [B, H, W]
+    preds = logits.argmax(dim=1)
     total = 0.0
     for c in range(num_classes):
         pred_c = (preds == c).float()
         tgt_c  = (targets == c).float()
         intersection = (pred_c * tgt_c).sum()
-        cardinality   = pred_c.sum() + tgt_c.sum()
+        cardinality  = pred_c.sum() + tgt_c.sum()
         total += ((2 * intersection + eps) / (cardinality + eps)).item()
     return total / num_classes
 
@@ -104,21 +106,23 @@ def dice_score(logits: torch.Tensor, targets: torch.Tensor, num_classes: int = 3
 def train_classifier(args, device):
     train_ds = OxfordIIITPetDataset(args.data_root, split="train")
     val_ds   = OxfordIIITPetDataset(args.data_root, split="val")
-    train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers, pin_memory=True)
-    val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    pin      = device.type == "cuda"
+    train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers, pin_memory=pin)
+    val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=pin)
 
-    model    = VGG11Classifier(num_classes=37, dropout_p=args.dropout_p).to(device)
+    model     = VGG11Classifier(num_classes=37, dropout_p=args.dropout_p).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    best_acc = 0.0
+    best_f1 = 0.0
     os.makedirs("checkpoints", exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
+        # --- Training ---
         model.train()
         train_loss = 0.0; correct = 0; total = 0
-        for batch in train_dl:
+        for batch in tqdm(train_dl, desc=f"[Classifier] Epoch {epoch}/{args.epochs} train", leave=False):
             imgs   = batch["image"].to(device)
             labels = batch["class_id"].to(device)
             optimizer.zero_grad()
@@ -130,44 +134,89 @@ def train_classifier(args, device):
             correct    += (logits.argmax(1) == labels).sum().item()
             total      += imgs.size(0)
         scheduler.step()
-
         train_loss /= total
         train_acc   = correct / total
 
+        # --- Validation ---
         model.eval()
         val_loss = 0.0; val_correct = 0; val_total = 0
+        all_preds = []; all_labels = []
         with torch.no_grad():
-            for batch in val_dl:
+            for batch in tqdm(val_dl, desc=f"[Classifier] Epoch {epoch}/{args.epochs} val", leave=False):
                 imgs   = batch["image"].to(device)
                 labels = batch["class_id"].to(device)
                 logits = model(imgs)
                 loss   = criterion(logits, labels)
+                preds  = logits.argmax(1)
                 val_loss    += loss.item() * imgs.size(0)
-                val_correct += (logits.argmax(1) == labels).sum().item()
+                val_correct += (preds == labels).sum().item()
                 val_total   += imgs.size(0)
+                all_preds.extend(preds.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+
         val_loss /= val_total
         val_acc   = val_correct / val_total
+        val_f1    = f1_score(all_labels, all_preds, average="macro", zero_division=0)
 
-        wandb.log({"cls/train_loss": train_loss, "cls/train_acc": train_acc,
-                   "cls/val_loss": val_loss, "cls/val_acc": val_acc, "epoch": epoch})
-        print(f"[Classifier] Epoch {epoch}/{args.epochs} | train_loss={train_loss:.4f} train_acc={train_acc:.4f} | val_loss={val_loss:.4f} val_acc={val_acc:.4f}")
+        wandb.log({
+            "cls/train_loss":    train_loss,
+            "cls/train_acc":     train_acc,
+            "cls/val_loss":      val_loss,
+            "cls/val_acc":       val_acc,
+            "cls/val_macro_f1":  val_f1,
+            "epoch": epoch,
+        })
+        print(f"[Classifier] Epoch {epoch}/{args.epochs} | train_loss={train_loss:.4f} train_acc={train_acc:.4f} | val_loss={val_loss:.4f} val_acc={val_acc:.4f} val_f1={val_f1:.4f}")
 
-        if val_acc > best_acc:
-            best_acc = val_acc
-            torch.save({"state_dict": model.state_dict(), "epoch": epoch, "best_metric": best_acc},
+        if val_f1 > best_f1:
+            best_f1 = val_f1
+            torch.save({"state_dict": model.state_dict(), "epoch": epoch, "best_metric": best_f1},
                        "checkpoints/classifier.pth")
+            print(f"  --> Saved best model (val_f1={val_f1:.4f})")
 
-    print(f"Best classifier val_acc: {best_acc:.4f}")
+    print(f"Best classifier val_f1: {best_f1:.4f}")
+
+
+# ============================================================
+# PATCH for train.py  — replace the existing train_localizer()
+# with this function.
+#
+# Also update the import at the top of train.py:
+#   FROM:  from losses.iou_loss import IoULoss
+#   TO:    from losses.iou_loss import IoULoss, CombinedLocLoss
+# ============================================================
+
+# Image side length assumed during training (must match OxfordIIITPetDataset resize)
+_IMG_SIZE = 224.0
+
+
+def _normalise_boxes(boxes: "torch.Tensor") -> "torch.Tensor":
+    """Normalise pixel-space (cx, cy, w, h) boxes to [0, 1] by dividing by
+    the image side length.  Works in-place on a cloned tensor so the original
+    batch dict is unmodified."""
+    return boxes / _IMG_SIZE
+
+
+def _denormalise_boxes(boxes: "torch.Tensor") -> "torch.Tensor":
+    """Recover pixel-space boxes from normalised ones (for IoU metric only)."""
+    return boxes * _IMG_SIZE
 
 
 def train_localizer(args, device):
     train_ds = OxfordIIITPetDataset(args.data_root, split="train")
     val_ds   = OxfordIIITPetDataset(args.data_root, split="val")
-    train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers, pin_memory=True)
-    val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                          num_workers=args.num_workers, pin_memory=True)
+    val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False,
+                          num_workers=args.num_workers, pin_memory=True)
 
-    model    = VGG11Localizer(dropout_p=args.dropout_p).to(device)
-    # Load pre-trained encoder weights from classifier checkpoint if available
+    model = VGG11Localizer(dropout_p=args.dropout_p).to(device)
+
+    # ------------------------------------------------------------------
+    # Load pretrained encoder weights from classifier checkpoint
+    # Then apply partial fine-tuning: freeze blocks 1–3, unfreeze 4–5
+    # (Fix 1)
+    # ------------------------------------------------------------------
     cls_ckpt_path = "checkpoints/classifier.pth"
     if os.path.exists(cls_ckpt_path):
         cls_sd = torch.load(cls_ckpt_path, map_location="cpu")
@@ -176,13 +225,24 @@ def train_localizer(args, device):
         enc_w = {k[len("encoder."):]: v for k, v in cls_sd.items() if k.startswith("encoder.")}
         model.encoder.load_state_dict(enc_w, strict=False)
         print("Loaded encoder weights from classifier checkpoint.")
-        # Freeze encoder
-        for p in model.encoder.parameters():
-            p.requires_grad = False
 
-    mse_loss  = nn.MSELoss()
-    iou_loss  = IoULoss(reduction="mean")
-    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-4)
+    # Partial freeze: blocks 1-3 frozen, blocks 4-5 trainable
+    model.freeze_encoder_partial()
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total     = sum(p.numel() for p in model.parameters())
+    print(f"Partial freeze applied — trainable params: {trainable:,} / {total:,}")
+
+    # ------------------------------------------------------------------
+    # Loss  (Fix 4): Combined IoU + L1 loss operating in normalised space
+    # ------------------------------------------------------------------
+    loc_loss  = CombinedLocLoss(lambda_l1=0.5)
+
+    # Only pass trainable params to the optimiser
+    optimizer = optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr,
+        weight_decay=1e-4,
+    )
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     best_iou = 0.0
@@ -191,17 +251,25 @@ def train_localizer(args, device):
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_loss = 0.0; train_iou_sum = 0.0; n = 0
+
         for batch in train_dl:
             imgs  = batch["image"].to(device)
-            boxes = batch["bbox"].to(device)
+            # Normalise boxes to [0, 1] for stable sigmoid regression  (Fix 2)
+            boxes = _normalise_boxes(batch["bbox"].to(device))
+
             optimizer.zero_grad()
-            pred  = model(imgs)
-            loss  = mse_loss(pred, boxes) + iou_loss(pred, boxes)
+            pred  = model(imgs)                    # [B, 4] ∈ [0, 1]
+            loss  = loc_loss(pred, boxes)
             loss.backward()
             optimizer.step()
+
+            # Metric in pixel space for interpretability
+            pred_px  = _denormalise_boxes(pred.detach())
+            boxes_px = _denormalise_boxes(boxes)
             train_loss    += loss.item() * imgs.size(0)
-            train_iou_sum += compute_iou(pred.detach(), boxes) * imgs.size(0)
+            train_iou_sum += compute_iou(pred_px, boxes_px) * imgs.size(0)
             n             += imgs.size(0)
+
         scheduler.step()
         train_loss /= n; train_iou = train_iou_sum / n
 
@@ -210,36 +278,52 @@ def train_localizer(args, device):
         with torch.no_grad():
             for batch in val_dl:
                 imgs  = batch["image"].to(device)
-                boxes = batch["bbox"].to(device)
+                boxes = _normalise_boxes(batch["bbox"].to(device))
+
                 pred  = model(imgs)
-                loss  = mse_loss(pred, boxes) + iou_loss(pred, boxes)
+                loss  = loc_loss(pred, boxes)
+
+                pred_px  = _denormalise_boxes(pred)
+                boxes_px = _denormalise_boxes(boxes)
                 val_loss    += loss.item() * imgs.size(0)
-                val_iou_sum += compute_iou(pred, boxes) * imgs.size(0)
+                val_iou_sum += compute_iou(pred_px, boxes_px) * imgs.size(0)
                 nv          += imgs.size(0)
+
         val_loss /= nv; val_iou = val_iou_sum / nv
 
-        wandb.log({"loc/train_loss": train_loss, "loc/train_iou": train_iou,
-                   "loc/val_loss": val_loss, "loc/val_iou": val_iou, "epoch": epoch})
-        print(f"[Localizer] Epoch {epoch}/{args.epochs} | train_loss={train_loss:.4f} train_iou={train_iou:.4f} | val_loss={val_loss:.4f} val_iou={val_iou:.4f}")
+        wandb.log({
+            "loc/train_loss": train_loss, "loc/train_iou": train_iou,
+            "loc/val_loss":   val_loss,   "loc/val_iou":   val_iou,
+            "epoch": epoch,
+        })
+        print(
+            f"[Localizer] Epoch {epoch}/{args.epochs} | "
+            f"train_loss={train_loss:.4f} train_iou={train_iou:.4f} | "
+            f"val_loss={val_loss:.4f} val_iou={val_iou:.4f}"
+        )
 
         if val_iou > best_iou:
             best_iou = val_iou
-            torch.save({"state_dict": model.state_dict(), "epoch": epoch, "best_metric": best_iou},
-                       "checkpoints/localizer.pth")
-    print(f"Best localizer val_iou: {best_iou:.4f}")
+            torch.save(
+                {"state_dict": model.state_dict(), "epoch": epoch, "best_metric": best_iou},
+                "checkpoints/localizer.pth",
+            )
 
+    print(f"Best localizer val_iou: {best_iou:.4f}")
 
 def train_unet(args, device):
     train_ds = OxfordIIITPetDataset(args.data_root, split="train")
     val_ds   = OxfordIIITPetDataset(args.data_root, split="val")
-    train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers, pin_memory=True)
-    val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    pin      = device.type == "cuda"
+    train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers, pin_memory=pin)
+    val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=pin)
 
-    model    = VGG11UNet(num_classes=3, dropout_p=args.dropout_p).to(device)
-    # Load pre-trained encoder weights
+    model = VGG11UNet(num_classes=3, dropout_p=args.dropout_p).to(device)
+
+    # Load pre-trained encoder from classifier checkpoint
     cls_ckpt_path = "checkpoints/classifier.pth"
     if os.path.exists(cls_ckpt_path):
-        cls_sd = torch.load(cls_ckpt_path, map_location="cpu")
+        cls_sd = torch.load(cls_ckpt_path, map_location="cpu", weights_only=False)
         if "state_dict" in cls_sd:
             cls_sd = cls_sd["state_dict"]
         enc_w = {k[len("encoder."):]: v for k, v in cls_sd.items() if k.startswith("encoder.")}
@@ -254,9 +338,10 @@ def train_unet(args, device):
     os.makedirs("checkpoints", exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
+        # --- Training ---
         model.train()
         train_loss = 0.0; train_dice_sum = 0.0; n = 0
-        for batch in train_dl:
+        for batch in tqdm(train_dl, desc=f"[UNet] Epoch {epoch}/{args.epochs} train", leave=False):
             imgs  = batch["image"].to(device)
             masks = batch["mask"].to(device)
             optimizer.zero_grad()
@@ -270,10 +355,11 @@ def train_unet(args, device):
         scheduler.step()
         train_loss /= n; train_dice = train_dice_sum / n
 
+        # --- Validation ---
         model.eval()
         val_loss = 0.0; val_dice_sum = 0.0; nv = 0
         with torch.no_grad():
-            for batch in val_dl:
+            for batch in tqdm(val_dl, desc=f"[UNet] Epoch {epoch}/{args.epochs} val", leave=False):
                 imgs  = batch["image"].to(device)
                 masks = batch["mask"].to(device)
                 logits = model(imgs)
@@ -283,22 +369,30 @@ def train_unet(args, device):
                 nv           += imgs.size(0)
         val_loss /= nv; val_dice = val_dice_sum / nv
 
-        wandb.log({"seg/train_loss": train_loss, "seg/train_dice": train_dice,
-                   "seg/val_loss": val_loss, "seg/val_dice": val_dice, "epoch": epoch})
+        wandb.log({
+            "seg/train_loss": train_loss,
+            "seg/train_dice": train_dice,
+            "seg/val_loss":   val_loss,
+            "seg/val_dice":   val_dice,
+            "epoch": epoch,
+        })
         print(f"[UNet] Epoch {epoch}/{args.epochs} | train_loss={train_loss:.4f} train_dice={train_dice:.4f} | val_loss={val_loss:.4f} val_dice={val_dice:.4f}")
 
         if val_dice > best_dice:
             best_dice = val_dice
             torch.save({"state_dict": model.state_dict(), "epoch": epoch, "best_metric": best_dice},
                        "checkpoints/unet.pth")
+            print(f"  --> Saved best model (val_dice={val_dice:.4f})")
+
     print(f"Best UNet val_dice: {best_dice:.4f}")
 
 
 def train_multitask(args, device):
     train_ds = OxfordIIITPetDataset(args.data_root, split="train")
     val_ds   = OxfordIIITPetDataset(args.data_root, split="val")
-    train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers, pin_memory=True)
-    val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    pin      = device.type == "cuda"
+    train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers, pin_memory=pin)
+    val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=pin)
 
     model = MultiTaskPerceptionModel(
         num_breeds=37, seg_classes=3,
@@ -319,9 +413,10 @@ def train_multitask(args, device):
     os.makedirs("checkpoints", exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
+        # --- Training ---
         model.train()
         metrics = {"cls_loss": 0, "loc_loss": 0, "seg_loss": 0, "total": 0, "n": 0}
-        for batch in train_dl:
+        for batch in tqdm(train_dl, desc=f"[MultiTask] Epoch {epoch}/{args.epochs} train", leave=False):
             imgs   = batch["image"].to(device)
             labels = batch["class_id"].to(device)
             boxes  = batch["bbox"].to(device)
@@ -343,38 +438,54 @@ def train_multitask(args, device):
         scheduler.step()
         n = metrics["n"]
         wandb.log({
-            "mt/train_cls_loss":  metrics["cls_loss"] / n,
-            "mt/train_loc_loss":  metrics["loc_loss"] / n,
-            "mt/train_seg_loss":  metrics["seg_loss"] / n,
+            "mt/train_cls_loss":   metrics["cls_loss"] / n,
+            "mt/train_loc_loss":   metrics["loc_loss"] / n,
+            "mt/train_seg_loss":   metrics["seg_loss"] / n,
             "mt/train_total_loss": metrics["total"] / n,
             "epoch": epoch,
         })
         print(f"[MultiTask] Epoch {epoch}/{args.epochs} | total={metrics['total']/n:.4f}")
 
-        # Validation
+        # --- Validation ---
         model.eval()
         val_acc = 0.0; val_iou = 0.0; val_dice = 0.0; nv = 0
+        all_preds_mt = []; all_labels_mt = []
         with torch.no_grad():
-            for batch in val_dl:
+            for batch in tqdm(val_dl, desc=f"[MultiTask] Epoch {epoch}/{args.epochs} val", leave=False):
                 imgs   = batch["image"].to(device)
                 labels = batch["class_id"].to(device)
                 boxes  = batch["bbox"].to(device)
                 masks  = batch["mask"].to(device)
                 out    = model(imgs)
-                bs = imgs.size(0)
-                val_acc  += (out["classification"].argmax(1) == labels).sum().item()
+                bs     = imgs.size(0)
+                preds  = out["classification"].argmax(1)
+                val_acc  += (preds == labels).sum().item()
                 val_iou  += compute_iou(out["localization"], boxes) * bs
                 val_dice += dice_score(out["segmentation"], masks) * bs
                 nv       += bs
-        val_acc /= nv; val_iou /= nv; val_dice /= nv
-        combined = (val_acc + val_iou + val_dice) / 3
-        wandb.log({"mt/val_acc": val_acc, "mt/val_iou": val_iou, "mt/val_dice": val_dice, "epoch": epoch})
-        print(f"  val_acc={val_acc:.4f} val_iou={val_iou:.4f} val_dice={val_dice:.4f}")
+                all_preds_mt.extend(preds.cpu().numpy())
+                all_labels_mt.extend(labels.cpu().numpy())
+
+        val_acc  /= nv
+        val_iou  /= nv
+        val_dice /= nv
+        val_f1    = f1_score(all_labels_mt, all_preds_mt, average="macro", zero_division=0)
+        combined  = (val_f1 + val_iou + val_dice) / 3
+
+        wandb.log({
+            "mt/val_acc":      val_acc,
+            "mt/val_macro_f1": val_f1,
+            "mt/val_iou":      val_iou,
+            "mt/val_dice":     val_dice,
+            "epoch": epoch,
+        })
+        print(f"  val_acc={val_acc:.4f} val_f1={val_f1:.4f} val_iou={val_iou:.4f} val_dice={val_dice:.4f}")
 
         if combined > best_combined:
             best_combined = combined
             torch.save({"state_dict": model.state_dict(), "epoch": epoch, "best_metric": combined},
                        "checkpoints/multitask.pth")
+            print(f"  --> Saved best model (combined={combined:.4f})")
 
 
 # ---------------------------------------------------------------------------
@@ -383,17 +494,17 @@ def train_multitask(args, device):
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--data_root",      type=str, required=True)
-    p.add_argument("--task",           type=str, default="classifier",
+    p.add_argument("--data_root",     type=str, required=True)
+    p.add_argument("--task",          type=str, default="classifier",
                    choices=["classifier", "localizer", "unet", "multitask", "all"])
-    p.add_argument("--epochs",         type=int, default=30)
-    p.add_argument("--batch_size",     type=int, default=32)
-    p.add_argument("--lr",             type=float, default=1e-3)
-    p.add_argument("--dropout_p",      type=float, default=0.5)
-    p.add_argument("--num_workers",    type=int, default=4)
-    p.add_argument("--wandb_project",  type=str, default="da6401_a2")
-    p.add_argument("--wandb_entity",   type=str, default=None)
-    p.add_argument("--device",         type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--epochs",        type=int,   default=30)
+    p.add_argument("--batch_size",    type=int,   default=32)
+    p.add_argument("--lr",            type=float, default=1e-3)
+    p.add_argument("--dropout_p",     type=float, default=0.5)
+    p.add_argument("--num_workers",   type=int,   default=4)
+    p.add_argument("--wandb_project", type=str,   default="da6401_a2")
+    p.add_argument("--wandb_entity",  type=str,   default=None)
+    p.add_argument("--device",        type=str,   default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
 
 
@@ -401,8 +512,12 @@ if __name__ == "__main__":
     args   = parse_args()
     device = torch.device(args.device)
 
-    wandb.init(project=args.wandb_project, entity=args.wandb_entity,
-               config=vars(args), name=f"task_{args.task}")
+    wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        config=vars(args),
+        name=f"task_{args.task}",
+    )
 
     if args.task == "all":
         train_classifier(args, device)

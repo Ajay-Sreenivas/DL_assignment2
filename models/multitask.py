@@ -56,12 +56,6 @@ class MultiTaskPerceptionModel(nn.Module):
         """
         super().__init__()
 
-        # --- Download pre-trained checkpoints from Google Drive ---
-        import gdown
-        gdown.download(id="128xX5UlMk5k_jzx5HQFzc9VopEl8DhCE", output=classifier_path, quiet=False)
-        gdown.download(id="1PKsvcf_G5mYZAL-eKXKNPdtN9EOQno2_", output=localizer_path, quiet=False)
-        gdown.download(id="1KD1DcLiMNEjrp9mZnQG_avIwnxY1pHUE", output=unet_path, quiet=False)
-
         # --- Shared backbone ---
         self.encoder = VGG11Encoder(in_channels=in_channels)
         self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
@@ -81,14 +75,18 @@ class MultiTaskPerceptionModel(nn.Module):
         )
 
         # --- Localisation head ---
-        self.loc_conv_head = nn.Sequential(
-            nn.Conv2d(512, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
+        self.loc_head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(512 * 7 * 7, 1024),
+            nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
-            nn.Conv2d(256, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
+            CustomDropout(p=0.5),
+            nn.Linear(1024, 256),
+            nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d((1, 1)),
+            CustomDropout(p=0.5),
+            nn.Linear(256, 4),
+            nn.ReLU(),
         )
 
         # --- Segmentation decoder (U-Net expansive path) ---
