@@ -1,0 +1,13 @@
+2026-04-02 16:34:16,011 INFO    MainThread:17888 [wandb_setup.py:_flush():81] Current SDK version is 0.25.0
+2026-04-02 16:34:16,011 INFO    MainThread:17888 [wandb_setup.py:_flush():81] Configure stats pid to 17888
+2026-04-02 16:34:16,011 INFO    MainThread:17888 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-04-02 16:34:16,012 INFO    MainThread:17888 [wandb_init.py:setup_run_log_directory():717] Logging user logs to C:\Users\Dell\Downloads\assignment2_complete\assignment2\wandb\run-20260402_163416-dunrh8uq\logs\debug.log
+2026-04-02 16:34:16,012 INFO    MainThread:17888 [wandb_init.py:setup_run_log_directory():718] Logging internal logs to C:\Users\Dell\Downloads\assignment2_complete\assignment2\wandb\run-20260402_163416-dunrh8uq\logs\debug-internal.log
+2026-04-02 16:34:16,012 INFO    MainThread:17888 [wandb_init.py:init():844] calling init triggers
+2026-04-02 16:34:16,012 INFO    MainThread:17888 [wandb_init.py:init():849] wandb.init called with sweep_config: {}
+config: {'data_root': 'data/oxford-iiit-pet', 'task': 'classifier', 'epochs': 2, 'batch_size': 32, 'lr': 0.001, 'dropout_p': 0.5, 'num_workers': 4, 'wandb_project': 'da6401_a2', 'wandb_entity': 'da25m023', 'device': 'cpu', '_wandb': {}}
+2026-04-02 16:34:16,012 INFO    MainThread:17888 [wandb_init.py:init():892] starting backend
+2026-04-02 16:34:20,087 INFO    MainThread:17888 [wandb_init.py:init():895] sending inform_init request
+2026-04-02 16:34:20,178 INFO    MainThread:17888 [wandb_init.py:init():903] backend started and connected
+2026-04-02 16:34:20,179 INFO    MainThread:17888 [wandb_init.py:init():973] updated telemetry
+2026-04-02 16:34:20,182 INFO    MainThread:17888 [wandb_init.py:init():997] communicating run to backend with 90.0 second timeout

@@ -1,0 +1,75 @@
+_wandb:
+    value:
+        cli_version: 0.25.0
+        e:
+            w236db77h8a4hrn2y67kko289f3qae1r:
+                args:
+                    - --data_root
+                    - data/oxford-iiit-pet
+                    - --task
+                    - classifier
+                    - --epochs
+                    - "2"
+                    - --wandb_entity
+                    - da25m023-iit-madras-foundation
+                codePath: train.py
+                codePathLocal: train.py
+                cpu_count: 4
+                cpu_count_logical: 8
+                disk:
+                    /:
+                        total: "212117483520"
+                        used: "180219863040"
+                email: da25m023@smail.iitm.ac.in
+                executable: C:\Users\Dell\AppData\Local\Programs\Python\Python313\python.exe
+                host: Gowris-PC
+                memory:
+                    total: "8464891904"
+                os: Windows-11-10.0.26200-SP0
+                program: C:\Users\Dell\Downloads\assignment2_complete\assignment2\train.py
+                python: CPython 3.13.5
+                root: C:\Users\Dell\Downloads\assignment2_complete\assignment2
+                startedAt: "2026-04-02T11:05:22.859414Z"
+                writerId: w236db77h8a4hrn2y67kko289f3qae1r
+        m: []
+        python_version: 3.13.5
+        t:
+            "1":
+                - 1
+                - 49
+                - 80
+                - 105
+            "2":
+                - 1
+                - 49
+                - 80
+                - 105
+            "3":
+                - 13
+                - 16
+            "4": 3.13.5
+            "5": 0.25.0
+            "8":
+                - 3
+            "12": 0.25.0
+            "13": windows-amd64
+batch_size:
+    value: 32
+data_root:
+    value: data/oxford-iiit-pet
+device:
+    value: cpu
+dropout_p:
+    value: 0.5
+epochs:
+    value: 2
+lr:
+    value: 0.001
+num_workers:
+    value: 4
+task:
+    value: classifier
+wandb_entity:
+    value: da25m023-iit-madras-foundation
+wandb_project:
+    value: da6401_a2

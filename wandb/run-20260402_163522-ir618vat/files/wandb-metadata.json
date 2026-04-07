@@ -1,0 +1,34 @@
+{
+  "os":  "Windows-11-10.0.26200-SP0",
+  "python":  "CPython 3.13.5",
+  "startedAt":  "2026-04-02T11:05:22.859414Z",
+  "args":  [
+    "--data_root",
+    "data/oxford-iiit-pet",
+    "--task",
+    "classifier",
+    "--epochs",
+    "2",
+    "--wandb_entity",
+    "da25m023-iit-madras-foundation"
+  ],
+  "program":  "C:\\Users\\Dell\\Downloads\\assignment2_complete\\assignment2\\train.py",
+  "codePath":  "train.py",
+  "codePathLocal":  "train.py",
+  "email":  "da25m023@smail.iitm.ac.in",
+  "root":  "C:\\Users\\Dell\\Downloads\\assignment2_complete\\assignment2",
+  "host":  "Gowris-PC",
+  "executable":  "C:\\Users\\Dell\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+  "cpu_count":  4,
+  "cpu_count_logical":  8,
+  "disk":  {
+    "/":  {
+      "total":  "212117483520",
+      "used":  "180219863040"
+    }
+  },
+  "memory":  {
+    "total":  "8464891904"
+  },
+  "writerId":  "w236db77h8a4hrn2y67kko289f3qae1r"
+}
