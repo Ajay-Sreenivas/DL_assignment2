@@ -26,10 +26,12 @@ class VGG11Localizer(nn.Module):
          head, which is randomly initialised and needs the most updates.
 
     Regression head: Deep MLP.
-    Flattening 512×7×7 = 25,088 frozen features and passing them through a wide
+    Flattening 512×7×7 = 25,088 frozen features and passing them through a
     MLP gives the head sufficient capacity to learn the bbox mapping.  Five FC
-    layers (4096 → 1024 → 512 → 256 → 4) with BatchNorm and Dropout provide
-    regularisation without limiting spatial reasoning.
+    layers (2048 → 1024 → 512 → 256 → 4) with BatchNorm and Dropout at every
+    hidden layer (including the 256 layer) provide strong regularisation.
+    First layer is reduced from 4096 → 2048 to cut the parameter count and
+    reduce memorisation risk.
 
     Output activation: ReLU.
     Bounding-box coordinates are non-negative pixel values in [0, IMAGE_SIZE].
@@ -38,7 +40,7 @@ class VGG11Localizer(nn.Module):
     and introduce saturation that slows gradient flow.
     """
 
-    def __init__(self, in_channels: int = 3, dropout_p: float = 0.3):
+    def __init__(self, in_channels: int = 3, dropout_p: float = 0.5):
         """
         Initialise the VGG11Localizer model.
 
@@ -58,17 +60,17 @@ class VGG11Localizer(nn.Module):
         self.reg_head = nn.Sequential(
             nn.Flatten(),                        # [B, 25088]
 
-            nn.Linear(512 * 7 * 7, 4096),
-            nn.BatchNorm1d(4096),
+            nn.Linear(512 * 7 * 7, 2048),        # reduced from 4096 → less memorisation
+            nn.BatchNorm1d(2048),
             nn.ReLU(inplace=True),
             CustomDropout(p=dropout_p),
 
-            nn.Linear(4096, 1024),
+            nn.Linear(2048, 1024),
             nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
             CustomDropout(p=dropout_p),
 
-            nn.Linear(1024, 512),               # extra hidden layer
+            nn.Linear(1024, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
             CustomDropout(p=dropout_p),
@@ -76,6 +78,7 @@ class VGG11Localizer(nn.Module):
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
+            CustomDropout(p=dropout_p),          # added — regularise pre-output layer
 
             nn.Linear(256, 4),
             nn.ReLU(),                           # non-negative pixel coordinates
@@ -89,10 +92,6 @@ class VGG11Localizer(nn.Module):
         """
         for p in self.encoder.parameters():
             p.requires_grad = False
-
-    # CLASSIFIER_DRIVE_ID = "128xX5UlMk5k_jzx5HQFzc9VopEl8DhCE"
-    # LOCALIZER_DRIVE_ID  = "1PKsvcf_G5mYZAL-eKXKNPdtN9EOQno2_"
-    # UNET_DRIVE_ID       = "1KD1DcLiMNEjrp9mZnQG_avIwnxY1pHUE"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass for the localisation model.

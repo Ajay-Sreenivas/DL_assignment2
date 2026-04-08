@@ -267,7 +267,7 @@ def train_localizer(args, device):
     optimizer = optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr,
-        weight_decay=1e-4,
+        weight_decay=1e-3,   # increased from 1e-4 for stronger L2 regularisation
     )
     # Cosine schedule works well when the head is trained from scratch
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -289,6 +289,10 @@ def train_localizer(args, device):
             pred  = model(imgs)                       # [B, 4] pixel space
             loss  = loc_loss(pred, boxes)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                filter(lambda p: p.requires_grad, model.parameters()),
+                max_norm=1.0,   # gradient clipping to stabilise head training
+            )
             optimizer.step()
             train_loss    += loss.item() * imgs.size(0)
             train_iou_sum += compute_iou(pred.detach(), boxes) * imgs.size(0)

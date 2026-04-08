@@ -11,7 +11,7 @@ from .layers import CustomDropout
 
 # Drive IDs — fill these in after uploading your checkpoints to Google Drive
 CLASSIFIER_DRIVE_ID = "128xX5UlMk5k_jzx5HQFzc9VopEl8DhCE"
-LOCALIZER_DRIVE_ID  = "1-VmcTpUTw0-wPL2i-pv3DFPqA6XJVl9h"
+LOCALIZER_DRIVE_ID  = "1PKsvcf_G5mYZAL-eKXKNPdtN9EOQno2_"
 UNET_DRIVE_ID       = "1KD1DcLiMNEjrp9mZnQG_avIwnxY1pHUE"
 
 
@@ -84,25 +84,27 @@ class MultiTaskPerceptionModel(nn.Module):
         )
 
         # --- Localisation head (FC-based, matches VGG11Localizer.reg_head architecture) ---
-        # Architecture: 25088 → 4096 → 1024 → 512 → 256 → 4
+        # Architecture: 25088 → 2048 → 1024 → 512 → 256 → 4
+        # Dropout at every hidden layer (including pre-output 256) for regularisation.
         # Output: (cx, cy, w, h) in pixel space via ReLU (matches localizer exactly)
         self.loc_head = nn.Sequential(
             nn.Flatten(),                        # [B, 25088]
-            nn.Linear(512 * 7 * 7, 4096),
-            nn.BatchNorm1d(4096),
+            nn.Linear(512 * 7 * 7, 2048),        # reduced from 4096 → less memorisation
+            nn.BatchNorm1d(2048),
             nn.ReLU(inplace=True),
             CustomDropout(p=0.5),
-            nn.Linear(4096, 1024),
+            nn.Linear(2048, 1024),
             nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
             CustomDropout(p=0.5),
-            nn.Linear(1024, 512),               # extra hidden layer
+            nn.Linear(1024, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
             CustomDropout(p=0.5),
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
+            CustomDropout(p=0.5),               # added — regularise pre-output layer
             nn.Linear(256, 4),
             nn.ReLU(),                           # non-negative pixel coordinates
         )

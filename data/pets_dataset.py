@@ -18,23 +18,80 @@ IMAGE_SIZE = 224  # VGG11 input size
 
 
 def get_transforms(split: str = "train"):
-    """Return albumentations transform pipeline for a given split."""
+    """Return albumentations transform pipeline for a given split.
+
+    Train pipeline uses aggressive spatial + colour augmentations to fight
+    overfitting on the small Oxford-IIIT Pet dataset (~3 600 training images).
+    All spatial transforms are applied BEFORE the final Resize so that
+    albumentations automatically updates the bounding-box coordinates.
+
+    Augmentation choices:
+      ShiftScaleRotate  — random translation (±10 %), scale (±20 %), and
+                          rotation (±15°) with zero-padding.  This is the
+                          single most useful transform for bbox regression
+                          because it creates diverse object positions and
+                          sizes the model has never seen verbatim.
+      HorizontalFlip    — cheap mirror augmentation; valid for pets.
+      RandomBrightnessContrast / HueSaturationValue
+                        — colour jitter that is harder to overfit than a
+                          fixed ColorJitter, covering brightness, contrast,
+                          hue, and saturation independently.
+      GaussNoise        — adds small Gaussian noise to simulate sensor noise
+                          and reduce pixel-level memorisation.
+      CoarseDropout     — randomly blacks-out 1-4 small patches (Cutout),
+                          forcing the model to rely on context rather than
+                          specific texture cues.  max_holes=4, max_height/
+                          width=32 px (≈14 % of 224 px side).
+    """
     if split == "train":
         return A.Compose(
             [
                 A.Resize(IMAGE_SIZE, IMAGE_SIZE),
+
+                # --- Geometric (bbox-aware) ---
+                A.ShiftScaleRotate(
+                    shift_limit=0.1,
+                    scale_limit=0.2,
+                    rotate_limit=15,
+                    border_mode=0,          # zero-padding
+                    p=0.7,
+                ),
                 A.HorizontalFlip(p=0.5),
-                A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
+
+                # --- Colour ---
+                A.RandomBrightnessContrast(
+                    brightness_limit=0.3,
+                    contrast_limit=0.3,
+                    p=0.6,
+                ),
+                A.HueSaturationValue(
+                    hue_shift_limit=15,
+                    sat_shift_limit=30,
+                    val_shift_limit=20,
+                    p=0.5,
+                ),
+
+                # --- Noise / occlusion ---
+                A.GaussNoise(var_limit=(10.0, 50.0), p=0.3),
+                A.CoarseDropout(
+                    max_holes=4,
+                    max_height=32,
+                    max_width=32,
+                    min_holes=1,
+                    fill_value=0,
+                    p=0.3,
+                ),
+
                 A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
                 ToTensorV2(),
             ],
             bbox_params=A.BboxParams(
                 format="albumentations",   # [x_min, y_min, x_max, y_max] normalised
                 label_fields=["bbox_labels"],
-                min_visibility=0.1,
+                min_visibility=0.2,        # raised from 0.1 — drop heavily cropped boxes
             ),
         )
-    else:  # val / test
+    else:  # val / test — deterministic, no augmentation
         return A.Compose(
             [
                 A.Resize(IMAGE_SIZE, IMAGE_SIZE),
