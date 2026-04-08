@@ -11,7 +11,7 @@ from .layers import CustomDropout
 
 # Drive IDs — fill these in after uploading your checkpoints to Google Drive
 CLASSIFIER_DRIVE_ID = "128xX5UlMk5k_jzx5HQFzc9VopEl8DhCE"
-LOCALIZER_DRIVE_ID  = "1PKsvcf_G5mYZAL-eKXKNPdtN9EOQno2_"
+LOCALIZER_DRIVE_ID  = "1-VmcTpUTw0-wPL2i-pv3DFPqA6XJVl9h"
 UNET_DRIVE_ID       = "1KD1DcLiMNEjrp9mZnQG_avIwnxY1pHUE"
 
 
