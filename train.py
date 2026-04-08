@@ -273,9 +273,9 @@ def train_localizer(args, device):
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     # ------------------------------------------------------------------
-    # Checkpoint based on Acc@IoU=0.5 — the exact Gradescope metric
+    # Checkpoint based on best validation IoU
     # ------------------------------------------------------------------
-    best_acc = 0.0
+    best_val_iou = 0.0
     os.makedirs("checkpoints", exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
@@ -329,21 +329,22 @@ def train_localizer(args, device):
             f"val_loss={val_loss:.4f} val_iou={val_iou:.4f} val_acc@0.5={val_acc:.4f}"
         )
 
-        # Save checkpoint when Acc@IoU=0.5 improves (mirrors Gradescope)
-        if val_acc > best_acc:
-            best_acc = val_acc
+        # Save checkpoint when val_iou improves
+        if val_iou > best_val_iou:
+            best_val_iou = val_iou
             torch.save(
                 {
                     "state_dict":   model.state_dict(),
                     "epoch":        epoch,
-                    "best_metric":  best_acc,
+                    "best_metric":  best_val_iou,
                     "val_iou":      val_iou,
+                    "val_acc_iou50": val_acc,
                 },
                 "checkpoints/localizer.pth",
             )
-            print(f"  ✅ Saved best checkpoint (Acc@IoU=0.5 = {best_acc:.4f})")
+            print(f"  ✅ Saved best checkpoint (val_iou = {best_val_iou:.4f}, Acc@IoU=0.5 = {val_acc:.4f})")
 
-    print(f"Best localizer Acc@IoU=0.5: {best_acc:.4f}")
+    print(f"Best localizer val_iou: {best_val_iou:.4f}")
 
 
 def train_unet(args, device):

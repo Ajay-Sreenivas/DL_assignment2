@@ -27,8 +27,8 @@ class VGG11Localizer(nn.Module):
 
     Regression head: Deep MLP.
     Flattening 512×7×7 = 25,088 frozen features and passing them through a wide
-    MLP gives the head sufficient capacity to learn the bbox mapping.  Four FC
-    layers (4096 → 1024 → 256 → 4) with BatchNorm and Dropout provide
+    MLP gives the head sufficient capacity to learn the bbox mapping.  Five FC
+    layers (4096 → 1024 → 512 → 256 → 4) with BatchNorm and Dropout provide
     regularisation without limiting spatial reasoning.
 
     Output activation: ReLU.
@@ -68,7 +68,12 @@ class VGG11Localizer(nn.Module):
             nn.ReLU(inplace=True),
             CustomDropout(p=dropout_p),
 
-            nn.Linear(1024, 256),
+            nn.Linear(1024, 512),               # extra hidden layer
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=True),
+            CustomDropout(p=dropout_p),
+
+            nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
 
@@ -84,6 +89,10 @@ class VGG11Localizer(nn.Module):
         """
         for p in self.encoder.parameters():
             p.requires_grad = False
+
+    # CLASSIFIER_DRIVE_ID = "128xX5UlMk5k_jzx5HQFzc9VopEl8DhCE"
+    # LOCALIZER_DRIVE_ID  = "1PKsvcf_G5mYZAL-eKXKNPdtN9EOQno2_"
+    # UNET_DRIVE_ID       = "1KD1DcLiMNEjrp9mZnQG_avIwnxY1pHUE"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass for the localisation model.

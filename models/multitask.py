@@ -83,19 +83,28 @@ class MultiTaskPerceptionModel(nn.Module):
             nn.Linear(4096, num_breeds),
         )
 
-        # --- Localisation head (FC-based, matches VGG11Localizer architecture) ---
+        # --- Localisation head (FC-based, matches VGG11Localizer.reg_head architecture) ---
+        # Architecture: 25088 → 4096 → 1024 → 512 → 256 → 4
+        # Output: (cx, cy, w, h) in pixel space via ReLU (matches localizer exactly)
         self.loc_head = nn.Sequential(
             nn.Flatten(),                        # [B, 25088]
-            nn.Linear(512 * 7 * 7, 1024),
+            nn.Linear(512 * 7 * 7, 4096),
+            nn.BatchNorm1d(4096),
+            nn.ReLU(inplace=True),
+            CustomDropout(p=0.5),
+            nn.Linear(4096, 1024),
             nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
             CustomDropout(p=0.5),
-            nn.Linear(1024, 256),
-            nn.BatchNorm1d(256),
+            nn.Linear(1024, 512),               # extra hidden layer
+            nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
             CustomDropout(p=0.5),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
             nn.Linear(256, 4),
-            nn.Sigmoid(),   # [0,1]; scaled to pixel space in forward()
+            nn.ReLU(),                           # non-negative pixel coordinates
         )
 
         # --- Segmentation decoder ---
@@ -187,8 +196,7 @@ class MultiTaskPerceptionModel(nn.Module):
 
         pooled   = self.avgpool(bottleneck)      # [B, 512, 7, 7]
         cls_out  = self.cls_head(pooled)         # [B, num_breeds]
-        loc_norm = self.loc_head(pooled)         # [B, 4] in [0, 1]
-        loc_out  = loc_norm * 224.0              # [B, 4] in pixel space
+        loc_out  = self.loc_head(pooled)         # [B, 4] pixel space (cx,cy,w,h)
 
         b = self.bottleneck_drop(bottleneck)
         d = self.up5(b);  d = self.dec5(torch.cat([d, skips["block5"]], dim=1))
