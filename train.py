@@ -200,10 +200,14 @@ def train_localizer(args, device):
         total     = sum(p.numel() for p in model.parameters())
         print(f"Loaded encoder weights. Partial freeze: {trainable}/{total} params trainable.")
 
-    # IoU + 0.5*L1: more stable than MSE, works well with normalised coords
-    l1_loss  = nn.L1Loss()
-    iou_loss = IoULoss(reduction="mean")
-    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-4)
+    # IoU + 0.5*HuberLoss: Huber is smoother than L1 near zero, more stable than MSE
+    # for large errors — best of both worlds for bbox regression
+    huber_loss = nn.HuberLoss(delta=0.1)   # delta=0.1 since values are normalised [0,1]
+    iou_loss   = IoULoss(reduction="mean")
+    optimizer  = optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr, weight_decay=1e-4
+    )
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     NORM = 224.0  # normalise pixel-space pred/target to [0,1] for stable loss
 
@@ -221,7 +225,7 @@ def train_localizer(args, device):
             pred  = model(imgs)                        # pixel space [0, 224]
             pred_n  = pred  / NORM
             boxes_n = boxes / NORM
-            loss = iou_loss(pred_n, boxes_n) + 0.5 * l1_loss(pred_n, boxes_n)
+            loss = iou_loss(pred_n, boxes_n) + 0.5 * huber_loss(pred_n, boxes_n)
             loss.backward()
             optimizer.step()
             train_loss    += loss.item() * imgs.size(0)
@@ -240,7 +244,7 @@ def train_localizer(args, device):
                 pred  = model(imgs)
                 pred_n  = pred  / NORM
                 boxes_n = boxes / NORM
-                loss = iou_loss(pred_n, boxes_n) + 0.5 * l1_loss(pred_n, boxes_n)
+                loss = iou_loss(pred_n, boxes_n) + 0.5 * huber_loss(pred_n, boxes_n)
                 val_loss    += loss.item() * imgs.size(0)
                 val_iou_sum += compute_iou(pred, boxes) * imgs.size(0)
                 nv          += imgs.size(0)
@@ -461,6 +465,18 @@ def parse_args():
     return p.parse_args()
 
 
+def copy_to_kaggle_output(filename: str):
+    """If running on Kaggle, copy checkpoint to /kaggle/working/ for download."""
+    import shutil
+    kaggle_out = "/kaggle/working"
+    if os.path.exists(kaggle_out):
+        src = os.path.join("checkpoints", filename)
+        dst = os.path.join(kaggle_out, filename)
+        if os.path.exists(src):
+            shutil.copy(src, dst)
+            print(f"  --> Copied {filename} to {dst} (Kaggle output panel)")
+
+
 if __name__ == "__main__":
     args   = parse_args()
     device = torch.device(args.device)
@@ -474,16 +490,24 @@ if __name__ == "__main__":
 
     if args.task == "all":
         train_classifier(args, device)
+        copy_to_kaggle_output("classifier.pth")
         train_localizer(args, device)
+        copy_to_kaggle_output("localizer.pth")
         train_unet(args, device)
+        copy_to_kaggle_output("unet.pth")
         train_multitask(args, device)
+        copy_to_kaggle_output("multitask.pth")
     elif args.task == "classifier":
         train_classifier(args, device)
+        copy_to_kaggle_output("classifier.pth")
     elif args.task == "localizer":
         train_localizer(args, device)
+        copy_to_kaggle_output("localizer.pth")
     elif args.task == "unet":
         train_unet(args, device)
+        copy_to_kaggle_output("unet.pth")
     elif args.task == "multitask":
         train_multitask(args, device)
+        copy_to_kaggle_output("multitask.pth")
 
     wandb.finish()

@@ -10,9 +10,9 @@ from .layers import CustomDropout
 
 
 # Drive IDs — fill these in after uploading your checkpoints to Google Drive
-CLASSIFIER_DRIVE_ID = "REPLACE_WITH_CLASSIFIER_PTH_DRIVE_ID"
-LOCALIZER_DRIVE_ID  = "REPLACE_WITH_LOCALIZER_PTH_DRIVE_ID"
-UNET_DRIVE_ID       = "REPLACE_WITH_UNET_PTH_DRIVE_ID"
+CLASSIFIER_DRIVE_ID = "128xX5UlMk5k_jzx5HQFzc9VopEl8DhCE"
+LOCALIZER_DRIVE_ID  = "1PKsvcf_G5mYZAL-eKXKNPdtN9EOQno2_"
+UNET_DRIVE_ID       = "1KD1DcLiMNEjrp9mZnQG_avIwnxY1pHUE"
 
 
 def _double_conv(in_c: int, out_c: int) -> nn.Sequential:
@@ -83,20 +83,18 @@ class MultiTaskPerceptionModel(nn.Module):
             nn.Linear(4096, num_breeds),
         )
 
-        # --- Localisation head (Conv-based, matches VGG11Localizer architecture) ---
+        # --- Localisation head (FC-based, matches VGG11Localizer architecture) ---
         self.loc_head = nn.Sequential(
-            nn.Conv2d(512, 256, kernel_size=3, padding=1),  # [B, 256, 7, 7]
-            nn.BatchNorm2d(256),
+            nn.Flatten(),                        # [B, 25088]
+            nn.Linear(512 * 7 * 7, 1024),
+            nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
-            nn.Conv2d(256, 128, kernel_size=3, padding=1),  # [B, 128, 7, 7]
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d((1, 1)),                   # [B, 128, 1, 1]
-            nn.Flatten(),                                   # [B, 128]
             CustomDropout(p=0.5),
-            nn.Linear(128, 64),
+            nn.Linear(1024, 256),
+            nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
-            nn.Linear(64, 4),
+            CustomDropout(p=0.5),
+            nn.Linear(256, 4),
             nn.Sigmoid(),   # [0,1]; scaled to pixel space in forward()
         )
 
@@ -187,11 +185,10 @@ class MultiTaskPerceptionModel(nn.Module):
         """
         bottleneck, skips = self.encoder(x, return_features=True)
 
-        pooled  = self.avgpool(bottleneck)
-        cls_out = self.cls_head(pooled)
-        # loc_head takes bottleneck directly (conv-based, no avgpool needed)
-        loc_norm = self.loc_head(bottleneck)   # [B, 4] in [0, 1]
-        loc_out  = loc_norm * 224.0            # scale to pixel space
+        pooled   = self.avgpool(bottleneck)      # [B, 512, 7, 7]
+        cls_out  = self.cls_head(pooled)         # [B, num_breeds]
+        loc_norm = self.loc_head(pooled)         # [B, 4] in [0, 1]
+        loc_out  = loc_norm * 224.0              # [B, 4] in pixel space
 
         b = self.bottleneck_drop(bottleneck)
         d = self.up5(b);  d = self.dec5(torch.cat([d, skips["block5"]], dim=1))
