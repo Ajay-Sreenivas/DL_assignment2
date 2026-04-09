@@ -54,7 +54,7 @@ def get_transforms(split: str = "train"):
                     scale_limit=0.2,
                     rotate_limit=15,
                     border_mode=0,          # zero-padding
-                    p=0.7,
+                    p=0.5,                  # reduced from 0.7
                 ),
                 A.HorizontalFlip(p=0.5),
 
@@ -70,17 +70,8 @@ def get_transforms(split: str = "train"):
                     val_shift_limit=20,
                     p=0.5,
                 ),
-
-                # --- Noise / occlusion ---
-                A.GaussNoise(var_limit=(10.0, 50.0), p=0.3),
-                A.CoarseDropout(
-                    max_holes=4,
-                    max_height=32,
-                    max_width=32,
-                    min_holes=1,
-                    fill_value=0,
-                    p=0.3,
-                ),
+                # CoarseDropout removed — it blacks out the animal head region
+                # the model is trying to localize, corrupting bbox labels.
 
                 A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
                 ToTensorV2(),

@@ -350,7 +350,7 @@ def train_localizer(args, device):
     optimizer = optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr,
-        weight_decay=1e-3,   # increased from 1e-4 for stronger L2 regularisation
+        weight_decay=1e-4,
     )
     # Cosine schedule works well when the head is trained from scratch
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)

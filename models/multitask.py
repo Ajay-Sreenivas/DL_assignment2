@@ -8,10 +8,10 @@ import gdown
 from .vgg11 import VGG11Encoder
 from .layers import CustomDropout
 
-##
+
 # Drive IDs — fill these in after uploading your checkpoints to Google Drive
 CLASSIFIER_DRIVE_ID = "128xX5UlMk5k_jzx5HQFzc9VopEl8DhCE"
-LOCALIZER_DRIVE_ID  = "1p-Ns0vBfOG5Mh0Oux0BpfTNXm5YTta_U"
+LOCALIZER_DRIVE_ID  = "1PKsvcf_G5mYZAL-eKXKNPdtN9EOQno2_"
 UNET_DRIVE_ID       = "1KD1DcLiMNEjrp9mZnQG_avIwnxY1pHUE"
 
 
@@ -59,11 +59,18 @@ class MultiTaskPerceptionModel(nn.Module):
         """
         super().__init__()
 
-        # --- Download checkpoints from Google Drive ---
+        # --- Download checkpoints from Google Drive (skip if already present) ---
         os.makedirs("checkpoints", exist_ok=True)
-        gdown.download(id=CLASSIFIER_DRIVE_ID, output=classifier_path, quiet=False)
-        gdown.download(id=LOCALIZER_DRIVE_ID,  output=localizer_path,  quiet=False)
-        gdown.download(id=UNET_DRIVE_ID,       output=unet_path,       quiet=False)
+        for drive_id, out_path in [
+            (CLASSIFIER_DRIVE_ID, classifier_path),
+            (LOCALIZER_DRIVE_ID,  localizer_path),
+            (UNET_DRIVE_ID,       unet_path),
+        ]:
+            if os.path.exists(out_path):
+                print(f"[MultiTask] Checkpoint already exists, skipping download: {out_path}")
+            else:
+                print(f"[MultiTask] Downloading checkpoint to {out_path} ...")
+                gdown.download(id=drive_id, output=out_path, quiet=False)
 
         # --- Shared backbone ---
         self.encoder = VGG11Encoder(in_channels=in_channels)
@@ -104,7 +111,7 @@ class MultiTaskPerceptionModel(nn.Module):
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
-            CustomDropout(p=0.5),               # added — regularise pre-output layer
+            # no dropout here — let the last hidden layer pass signal cleanly
             nn.Linear(256, 4),
             nn.ReLU(),                           # non-negative pixel coordinates
         )

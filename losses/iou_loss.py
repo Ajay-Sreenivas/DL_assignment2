@@ -116,7 +116,16 @@ class CombinedLocLoss(nn.Module):
 
         Returns:
             Scalar combined loss.
+
+        Note on scaling:
+            IoU loss is always in [0, 1].
+            SmoothL1 on raw pixel coords (0–224) produces values of 8–100+,
+            which would contribute 94 %+ of the gradient and effectively
+            switch off the IoU signal entirely.
+            Dividing both tensors by IMAGE_SIZE=224 normalises coordinates
+            to [0, 1] so both terms are balanced.
         """
+        IMAGE_SIZE = 224.0
         iou = self.iou_loss(pred_boxes, target_boxes)
-        l1  = F.smooth_l1_loss(pred_boxes, target_boxes)
+        l1  = F.smooth_l1_loss(pred_boxes / IMAGE_SIZE, target_boxes / IMAGE_SIZE)
         return iou + self.lambda_l1 * l1

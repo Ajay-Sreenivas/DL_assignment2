@@ -40,7 +40,7 @@ class VGG11Localizer(nn.Module):
     and introduce saturation that slows gradient flow.
     """
 
-    def __init__(self, in_channels: int = 3, dropout_p: float = 0.5):
+    def __init__(self, in_channels: int = 3, dropout_p: float = 0.3):
         """
         Initialise the VGG11Localizer model.
 
@@ -78,7 +78,7 @@ class VGG11Localizer(nn.Module):
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
-            CustomDropout(p=dropout_p),          # added — regularise pre-output layer
+            # no dropout here — let the last hidden layer pass signal cleanly
 
             nn.Linear(256, 4),
             nn.ReLU(),                           # non-negative pixel coordinates
