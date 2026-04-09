@@ -112,3 +112,4 @@ class VGG11UNet(nn.Module):
         d = self.dec1(torch.cat([d, skips["block1"]], dim=1))  # [B, 64, 224, 224]
 
         return self.out_conv(d)                                # [B, num_classes, 224, 224]
+    

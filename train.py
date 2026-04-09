@@ -451,8 +451,20 @@ def train_unet(args, device):
         model.encoder.load_state_dict(enc_w, strict=False)
         print("Loaded encoder weights from classifier checkpoint.")
 
+    # Freeze the encoder so its weights stay identical to classifier.pth.
+    # This ensures the multitask model can share one encoder for both
+    # classification and segmentation without a feature distribution mismatch.
+    for p in model.encoder.parameters():
+        p.requires_grad = False
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total     = sum(p.numel() for p in model.parameters())
+    print(f"[UNet] Encoder frozen — training decoder only: {trainable:,} / {total:,} params")
+
     seg_loss  = SegLoss(num_classes=3)
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr, weight_decay=1e-4,
+    )
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     best_dice = 0.0

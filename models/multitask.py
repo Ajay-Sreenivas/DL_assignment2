@@ -79,9 +79,19 @@ class MultiTaskPerceptionModel(nn.Module):
                 print(f"[MultiTask] Downloading checkpoint to {out_path} ...")
                 gdown.download(id=drive_id, output=out_path, quiet=False)
 
-        # --- Shared backbone ---
+        # --- Shared backbone (classification + localisation) ---
         self.encoder = VGG11Encoder(in_channels=in_channels)
         self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
+
+        # --- Segmentation encoder (separate from shared encoder) ---
+        # The UNet decoder was trained with an encoder that was fine-tuned
+        # for segmentation (not frozen during train_unet).  Its weights
+        # diverged from classifier.pth, so the decoder skip-connection
+        # features only match the UNet-adapted encoder.
+        # Solution: keep a dedicated seg_encoder loaded from unet.pth so
+        # the decoder always sees the features it was trained against,
+        # while self.encoder (from classifier.pth) serves cls + loc.
+        self.seg_encoder = VGG11Encoder(in_channels=in_channels)
 
         # --- Classification head ---
         self.cls_head = nn.Sequential(
@@ -187,17 +197,21 @@ class MultiTaskPerceptionModel(nn.Module):
             else:
                 print("[MultiTask] Loaded localizer weights.")
 
-        # --- Step 3: unet → decoder only (encoder NOT overridden) ---
-        # The decoder layers are loaded from unet.pth.
-        # The encoder is NOT overridden here — the classifier encoder loaded in
-        # Step 1 must be preserved so that cls_head continues to receive the
-        # classification-tuned features it was trained against.
-        # Overriding the encoder with UNet weights destroys classification
-        # performance (Macro-F1 drops to 0.0) because cls_head was trained
-        # against classification encoder features, not segmentation ones.
+        # --- Step 3: unet → seg_encoder + decoder ---
+        # seg_encoder is a dedicated VGG11Encoder for the segmentation path.
+        # It is loaded with UNet-adapted weights so the decoder skip connections
+        # see exactly the same feature distribution they were trained against.
+        # self.encoder (classification encoder) is never touched here,
+        # preserving cls_head performance.
         unet_sd = self._load_ckpt(unet_path)
         if unet_sd:
-            # 3a. Decoder layers only — do NOT touch the encoder
+            # 3a. Load UNet encoder into dedicated seg_encoder
+            unet_enc_w = {k[len("encoder."):]: v
+                          for k, v in unet_sd.items() if k.startswith("encoder.")}
+            if unet_enc_w:
+                self.seg_encoder.load_state_dict(unet_enc_w, strict=False)
+
+            # 3b. Decoder layers
             seg_layers = ["up5", "dec5", "up4", "dec4", "up3", "dec3",
                           "up2", "dec2", "up1", "dec1", "bottleneck_drop"]
             for layer in seg_layers:
@@ -207,7 +221,7 @@ class MultiTaskPerceptionModel(nn.Module):
                 if lw:
                     module.load_state_dict(lw, strict=False)
 
-            # 3b. Final projection — accept both "seg_out.*" (new) and "out_conv.*" (old)
+            # 3c. Final projection — accept both "seg_out.*" (new) and "out_conv.*" (old)
             final_w = {k[len("seg_out."):]: v
                        for k, v in unet_sd.items() if k.startswith("seg_out.")}
             if not final_w:
@@ -234,13 +248,17 @@ class MultiTaskPerceptionModel(nn.Module):
               'localization'   — [B, 4] (cx, cy, w, h) in pixel space
               'segmentation'   — [B, seg_classes, H, W] logits
         """
-        bottleneck, skips = self.encoder(x, return_features=True)
-
+        # Classification + localisation use the shared (classifier) encoder
+        bottleneck, _ = self.encoder(x, return_features=True)
         pooled  = self.avgpool(bottleneck)
         cls_out = self.cls_head(pooled)          # [B, num_breeds]
         loc_out = self.loc_head(pooled)          # [B, 4] pixel space
 
-        b = self.bottleneck_drop(bottleneck)
+        # Segmentation uses the dedicated seg_encoder (UNet-adapted weights)
+        # so the decoder skip connections see the feature distribution they
+        # were trained against
+        seg_bottleneck, skips = self.seg_encoder(x, return_features=True)
+        b = self.bottleneck_drop(seg_bottleneck)
         d = self.up5(b);  d = self.dec5(torch.cat([d, skips["block5"]], dim=1))
         d = self.up4(d);  d = self.dec4(torch.cat([d, skips["block4"]], dim=1))
         d = self.up3(d);  d = self.dec3(torch.cat([d, skips["block3"]], dim=1))
