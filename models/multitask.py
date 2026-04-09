@@ -187,15 +187,17 @@ class MultiTaskPerceptionModel(nn.Module):
             else:
                 print("[MultiTask] Loaded localizer weights.")
 
-        # --- Step 3: unet → decoder + encoder override ---
-        # The UNet decoder was trained against encoder features from unet.pth.
-        # Loading only the decoder but keeping the classifier encoder causes a
-        # feature distribution mismatch → Dice ~0.25 despite training Dice ~0.87.
-        # Fix: load the UNet encoder weights AFTER the decoder so both sides of
-        # every skip connection use the same encoder feature distribution.
+        # --- Step 3: unet → decoder only (encoder NOT overridden) ---
+        # The decoder layers are loaded from unet.pth.
+        # The encoder is NOT overridden here — the classifier encoder loaded in
+        # Step 1 must be preserved so that cls_head continues to receive the
+        # classification-tuned features it was trained against.
+        # Overriding the encoder with UNet weights destroys classification
+        # performance (Macro-F1 drops to 0.0) because cls_head was trained
+        # against classification encoder features, not segmentation ones.
         unet_sd = self._load_ckpt(unet_path)
         if unet_sd:
-            # 3a. Decoder layers
+            # 3a. Decoder layers only — do NOT touch the encoder
             seg_layers = ["up5", "dec5", "up4", "dec4", "up3", "dec3",
                           "up2", "dec2", "up1", "dec1", "bottleneck_drop"]
             for layer in seg_layers:
@@ -215,18 +217,7 @@ class MultiTaskPerceptionModel(nn.Module):
                     print("[MultiTask] INFO: unet.pth uses 'out_conv' key — loading into seg_out.")
             if final_w:
                 self.seg_out.load_state_dict(final_w, strict=True)
-
-            # 3c. Override encoder with UNet-adapted weights
-            # The UNet fine-tuned the encoder from classification weights, so
-            # classification performance is preserved while segmentation features
-            # now match what the decoder expects.
-            unet_enc_w = {k[len("encoder."):]: v
-                          for k, v in unet_sd.items() if k.startswith("encoder.")}
-            if unet_enc_w:
-                self.encoder.load_state_dict(unet_enc_w, strict=False)
-                print("[MultiTask] Loaded UNet weights (decoder + encoder override).")
-            else:
-                print("[MultiTask] Loaded UNet decoder weights (no encoder in checkpoint).")
+                print("[MultiTask] Loaded UNet weights.")
 
     # ------------------------------------------------------------------
     # Forward
