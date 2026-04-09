@@ -82,28 +82,23 @@ class MultiTaskPerceptionModel(nn.Module):
         )
 
         # --- Localisation head ---
-        # Matches VGG11Localizer.reg_head in localization.py exactly:
-        #   25088 → 4096 → 1024 → 256 → 4
-        #   Single CustomDropout(p=0.1) after the first layer.
-        #   ReLU output → non-negative (cx, cy, w, h) in pixel space.
+        # MUST match VGG11Localizer.reg_head in localization.py exactly so
+        # that weight shapes align when loading localizer.pth.
+        # localization.py defines:  25088 → 1024 → 256 → 4, dropout_p=0.2
         self.loc_head = nn.Sequential(
-            nn.Flatten(),
+            nn.Flatten(),                        # [B, 25088]
 
-            nn.Linear(512 * 7 * 7, 4096),
-            nn.BatchNorm1d(4096),
-            nn.ReLU(inplace=True),
-            CustomDropout(p=0.1),
-
-            nn.Linear(4096, 1024),
+            nn.Linear(512 * 7 * 7, 1024),
             nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
+            CustomDropout(p=0.2),               # matches localization.py default
 
             nn.Linear(1024, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
 
             nn.Linear(256, 4),
-            nn.ReLU(),
+            nn.ReLU(),                           # non-negative (cx, cy, w, h) pixel space
         )
 
         # --- Segmentation decoder ---
@@ -172,10 +167,8 @@ class MultiTaskPerceptionModel(nn.Module):
         # Tolerates BOTH key naming conventions in unet.pth:
         #   "seg_out.*"  — checkpoints saved with the new segmentation.py
         #   "out_conv.*" — checkpoints saved with the old segmentation.py
-        # Both map correctly into self.seg_out.
         unet_sd = self._load_ckpt(unet_path)
         if unet_sd:
-            # Load decoder layers (same names in both old and new checkpoints)
             seg_layers = ["up5", "dec5", "up4", "dec4", "up3", "dec3",
                           "up2", "dec2", "up1", "dec1", "bottleneck_drop"]
             for layer in seg_layers:
@@ -219,7 +212,7 @@ class MultiTaskPerceptionModel(nn.Module):
 
         pooled  = self.avgpool(bottleneck)
         cls_out = self.cls_head(pooled)          # [B, num_breeds]
-        loc_out = self.loc_head(pooled)          # [B, 4]
+        loc_out = self.loc_head(pooled)          # [B, 4] pixel space
 
         b = self.bottleneck_drop(bottleneck)
         d = self.up5(b);  d = self.dec5(torch.cat([d, skips["block5"]], dim=1))
