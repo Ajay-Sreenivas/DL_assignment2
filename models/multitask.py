@@ -9,10 +9,11 @@ from .vgg11 import VGG11Encoder
 from .layers import CustomDropout
 
 
-# Drive IDs — fill these in after uploading your checkpoints to Google Drive, ok
+# ── Google Drive checkpoint IDs ───────────────────────────────────────────────
 CLASSIFIER_DRIVE_ID = "128xX5UlMk5k_jzx5HQFzc9VopEl8DhCE"
-LOCALIZER_DRIVE_ID  = "1PKsvcf_G5mYZAL-eKXKNPdtN9EOQno2_"
+LOCALIZER_DRIVE_ID  = "1p-Ns0vBfOG5Mh0Oux0BpfTNXm5YTta_U"
 UNET_DRIVE_ID       = "1KD1DcLiMNEjrp9mZnQG_avIwnxY1pHUE"
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _double_conv(in_c: int, out_c: int) -> nn.Sequential:
@@ -47,16 +48,6 @@ class MultiTaskPerceptionModel(nn.Module):
         localizer_path: str = "checkpoints/localizer.pth",
         unet_path: str = "checkpoints/unet.pth",
     ):
-        """
-        Initialize the shared backbone/heads using trained weights.
-        Args:
-            num_breeds:       Number of output classes for classification head.
-            seg_classes:      Number of output classes for segmentation head.
-            in_channels:      Number of input channels.
-            classifier_path:  Path to trained classifier weights.
-            localizer_path:   Path to trained localizer weights.
-            unet_path:        Path to trained unet weights.
-        """
         super().__init__()
 
         # --- Download checkpoints from Google Drive (skip if already present) ---
@@ -90,20 +81,29 @@ class MultiTaskPerceptionModel(nn.Module):
             nn.Linear(4096, num_breeds),
         )
 
-        # --- Localisation head (matches VGG11Localizer.reg_head exactly) ---
-        # Architecture: 25088 -> 1024 -> 256 -> 4
-        # Single Dropout(0.2) after first layer, ReLU output (pixel space)
+        # --- Localisation head ---
+        # Matches VGG11Localizer.reg_head in localization.py exactly:
+        #   25088 → 4096 → 1024 → 256 → 4
+        #   Single CustomDropout(p=0.1) after the first layer.
+        #   ReLU output → non-negative (cx, cy, w, h) in pixel space.
         self.loc_head = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(512 * 7 * 7, 1024),
+
+            nn.Linear(512 * 7 * 7, 4096),
+            nn.BatchNorm1d(4096),
+            nn.ReLU(inplace=True),
+            CustomDropout(p=0.1),
+
+            nn.Linear(4096, 1024),
             nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
-            CustomDropout(p=0.2),
+
             nn.Linear(1024, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
+
             nn.Linear(256, 4),
-            nn.ReLU(),                           # non-negative pixel coordinates
+            nn.ReLU(),
         )
 
         # --- Segmentation decoder ---
@@ -149,7 +149,7 @@ class MultiTaskPerceptionModel(nn.Module):
     def _load_pretrained(self, classifier_path, localizer_path, unet_path):
         """Transfer encoder + head weights from the three single-task checkpoints."""
 
-        # classifier -> encoder + cls_head
+        # --- classifier → encoder + cls_head ---
         cls_sd = self._load_ckpt(classifier_path)
         if cls_sd:
             enc_w  = {k[len("encoder."):]: v   for k, v in cls_sd.items() if k.startswith("encoder.")}
@@ -158,44 +158,68 @@ class MultiTaskPerceptionModel(nn.Module):
             self.cls_head.load_state_dict(head_w, strict=False)
             print("[MultiTask] Loaded classifier weights.")
 
-        # localizer -> loc_head
+        # --- localizer → loc_head ---
         loc_sd = self._load_ckpt(localizer_path)
         if loc_sd:
             head_w = {k[len("reg_head."):]: v for k, v in loc_sd.items() if k.startswith("reg_head.")}
-            self.loc_head.load_state_dict(head_w, strict=False)
-            print("[MultiTask] Loaded localizer weights.")
+            missing, unexpected = self.loc_head.load_state_dict(head_w, strict=False)
+            if missing:
+                print(f"[MultiTask] WARNING: localizer missing keys ({len(missing)}): {missing[:2]}")
+            else:
+                print("[MultiTask] Loaded localizer weights.")
 
-        # unet -> segmentation decoder
+        # --- unet → segmentation decoder ---
+        # Tolerates BOTH key naming conventions in unet.pth:
+        #   "seg_out.*"  — checkpoints saved with the new segmentation.py
+        #   "out_conv.*" — checkpoints saved with the old segmentation.py
+        # Both map correctly into self.seg_out.
         unet_sd = self._load_ckpt(unet_path)
         if unet_sd:
+            # Load decoder layers (same names in both old and new checkpoints)
             seg_layers = ["up5", "dec5", "up4", "dec4", "up3", "dec3",
-                          "up2", "dec2", "up1", "dec1", "seg_out", "bottleneck_drop"]
+                          "up2", "dec2", "up1", "dec1", "bottleneck_drop"]
             for layer in seg_layers:
                 module = getattr(self, layer)
-                lw = {k[len(layer)+1:]: v for k, v in unet_sd.items() if k.startswith(layer + ".")}
+                lw = {k[len(layer) + 1:]: v
+                      for k, v in unet_sd.items() if k.startswith(layer + ".")}
                 if lw:
                     module.load_state_dict(lw, strict=False)
-            print("[MultiTask] Loaded UNet weights.")
+
+            # Load final projection — try "seg_out.*" first, fall back to "out_conv.*"
+            final_w = {k[len("seg_out."):]: v
+                       for k, v in unet_sd.items() if k.startswith("seg_out.")}
+            if not final_w:
+                final_w = {k[len("out_conv."):]: v
+                           for k, v in unet_sd.items() if k.startswith("out_conv.")}
+                if final_w:
+                    print("[MultiTask] INFO: unet.pth has 'out_conv' keys — loading into seg_out.")
+
+            if final_w:
+                self.seg_out.load_state_dict(final_w, strict=True)
+                print("[MultiTask] Loaded UNet weights.")
+            else:
+                print("[MultiTask] WARNING: no seg_out/out_conv keys in unet.pth — seg head is random!")
 
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
 
     def forward(self, x: torch.Tensor):
-        """Forward pass for multi-task model.
+        """Single forward pass yielding all three task outputs.
+
         Args:
             x: Input tensor of shape [B, in_channels, H, W].
         Returns:
-            A dict with keys:
-            - 'classification': [B, num_breeds] logits tensor.
-            - 'localization':   [B, 4] bounding box tensor.
-            - 'segmentation':   [B, seg_classes, H, W] segmentation logits tensor.
+            dict with keys:
+              'classification' — [B, num_breeds] logits
+              'localization'   — [B, 4] (cx, cy, w, h) in pixel space
+              'segmentation'   — [B, seg_classes, H, W] logits
         """
         bottleneck, skips = self.encoder(x, return_features=True)
 
-        pooled   = self.avgpool(bottleneck)      # [B, 512, 7, 7]
-        cls_out  = self.cls_head(pooled)         # [B, num_breeds]
-        loc_out  = self.loc_head(pooled)         # [B, 4] pixel space (cx,cy,w,h)
+        pooled  = self.avgpool(bottleneck)
+        cls_out = self.cls_head(pooled)          # [B, num_breeds]
+        loc_out = self.loc_head(pooled)          # [B, 4]
 
         b = self.bottleneck_drop(bottleneck)
         d = self.up5(b);  d = self.dec5(torch.cat([d, skips["block5"]], dim=1))
@@ -203,7 +227,7 @@ class MultiTaskPerceptionModel(nn.Module):
         d = self.up3(d);  d = self.dec3(torch.cat([d, skips["block3"]], dim=1))
         d = self.up2(d);  d = self.dec2(torch.cat([d, skips["block2"]], dim=1))
         d = self.up1(d);  d = self.dec1(torch.cat([d, skips["block1"]], dim=1))
-        seg_out = self.seg_out(d)
+        seg_out = self.seg_out(d)                # [B, seg_classes, H, W]
 
         return {
             "classification": cls_out,
