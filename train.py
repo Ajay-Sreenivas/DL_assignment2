@@ -100,6 +100,94 @@ def dice_score(logits: torch.Tensor, targets: torch.Tensor, num_classes: int = 3
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint persistence — upload to Google Drive from Kaggle
+# ---------------------------------------------------------------------------
+
+def save_to_drive(filename: str, folder_id: str = None):
+    """Upload a checkpoint directly to Google Drive using the Drive API.
+
+    This avoids the painfully slow Kaggle output-panel download.
+    After training, grab the file straight from your Google Drive.
+
+    Prerequisites (run once at the top of your Kaggle notebook):
+        from google.colab import auth   # or use kaggle_secrets + oauth
+        auth.authenticate_user()
+        from pydrive.auth import GoogleAuth
+        from pydrive.drive import GoogleDrive
+        # -- OR just pip install PyDrive2 and authenticate below --
+
+    The function handles its own auth via a service-account-free OAuth flow
+    using PyDrive2. Set GDRIVE_FOLDER_ID in your Kaggle notebook environment
+    (Kaggle → Add-ons → Secrets) to upload into a specific Drive folder;
+    if unset, the file lands in My Drive root.
+
+    Args:
+        filename:  e.g. 'localizer.pth' — looked up under checkpoints/
+        folder_id: Google Drive folder ID to upload into (overrides env var).
+    """
+    src = os.path.join("checkpoints", filename)
+    if not os.path.exists(src):
+        print(f"  [Drive] Skipping upload — file not found: {src}")
+        return
+
+    # Resolve target folder
+    if folder_id is None:
+        folder_id = os.environ.get("GDRIVE_FOLDER_ID", None)
+
+    try:
+        from pydrive2.auth import GoogleAuth
+        from pydrive2.drive import GoogleDrive
+        from oauth2client.service_account import ServiceAccountCredentials
+
+        gauth = GoogleAuth()
+        # Use local webserver auth (works in Kaggle interactive sessions)
+        gauth.LocalWebserverAuth()
+        drive = GoogleDrive(gauth)
+
+        # Search for existing file with same name in the target folder so we
+        # overwrite rather than create duplicates on every best-checkpoint save.
+        query = f"title='{filename}' and trashed=false"
+        if folder_id:
+            query += f" and '{folder_id}' in parents"
+        existing = drive.ListFile({"q": query}).GetList()
+
+        if existing:
+            gfile = existing[0]
+            print(f"  [Drive] Overwriting existing file: {filename} (id={gfile['id']})")
+        else:
+            meta = {"title": filename}
+            if folder_id:
+                meta["parents"] = [{"id": folder_id}]
+            gfile = drive.CreateFile(meta)
+
+        gfile.SetContentFile(src)
+        gfile.Upload()
+        print(f"  [Drive] ✅ Uploaded {filename} → Google Drive (id={gfile['id']})")
+
+    except ImportError:
+        print("  [Drive] PyDrive2 not installed. Run: pip install PyDrive2 -q")
+    except Exception as e:
+        print(f"  [Drive] Upload failed: {e}")
+        # Fall back to /kaggle/working so the file is at least in the output panel
+        import shutil
+        kaggle_out = "/kaggle/working"
+        if os.path.exists(kaggle_out):
+            shutil.copy(src, os.path.join(kaggle_out, filename))
+            print(f"  [Drive] Fell back to Kaggle output panel: /kaggle/working/{filename}")
+
+
+def copy_to_kaggle_output(filename: str):
+    """Copy checkpoint to /kaggle/working/ (fallback — prefer save_to_drive)."""
+    import shutil
+    kaggle_out = "/kaggle/working"
+    if os.path.exists(kaggle_out):
+        src = os.path.join("checkpoints", filename)
+        if os.path.exists(src):
+            shutil.copy(src, os.path.join(kaggle_out, filename))
+            print(f"  --> Copied {filename} to /kaggle/working/ (output panel)")
+
+
+# ---------------------------------------------------------------------------
 # Training loops
 # ---------------------------------------------------------------------------
 
@@ -230,9 +318,8 @@ def _acc_at_iou(pred_boxes: "torch.Tensor",
 
 
 def train_localizer(args, device):
-    # require_bbox=True filters out the ~50 % of Oxford-IIIT Pet images that
-    # have no XML annotation, preventing fake whole-image fallback boxes from
-    # poisoning the training signal.
+    # Only images that have a matching .xml annotation are used for training.
+    # Same base name: images/Abyssinian_1.jpg ←→ annotations/xmls/Abyssinian_1.xml
     train_ds = OxfordIIITPetDataset(args.data_root, split="train", require_bbox=True)
     val_ds   = OxfordIIITPetDataset(args.data_root, split="val",   require_bbox=True)
     pin      = device.type == "cuda"
@@ -350,6 +437,8 @@ def train_localizer(args, device):
                 "checkpoints/localizer.pth",
             )
             print(f"  ✅ Saved best checkpoint (val_iou = {best_val_iou:.4f}, Acc@IoU=0.5 = {val_acc:.4f})")
+            # Upload immediately to Google Drive so it survives session timeout
+            save_to_drive("localizer.pth")
 
     print(f"Best localizer val_iou: {best_val_iou:.4f}")
 
@@ -551,16 +640,6 @@ def parse_args():
     return p.parse_args()
 
 
-def copy_to_kaggle_output(filename: str):
-    """If running on Kaggle, copy checkpoint to /kaggle/working/ for download."""
-    import shutil
-    kaggle_out = "/kaggle/working"
-    if os.path.exists(kaggle_out):
-        src = os.path.join("checkpoints", filename)
-        dst = os.path.join(kaggle_out, filename)
-        if os.path.exists(src):
-            shutil.copy(src, dst)
-            print(f"  --> Copied {filename} to {dst} (Kaggle output panel)")
 
 
 if __name__ == "__main__":
