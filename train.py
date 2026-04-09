@@ -312,7 +312,7 @@ def _acc_at_iou(pred_boxes: "torch.Tensor",
 
 def train_localizer(args, device):
     # Only images that have a matching .xml annotation are used for training.
-    # Same base name: images/Abyssinian_1.jpg ←→ annotations/xmls/Abyssinian_1.xml
+    # Same base name: images/Abyssinian_1.jpg <-> annotations/xmls/Abyssinian_1.xml
     train_ds = OxfordIIITPetDataset(args.data_root, split="train", require_bbox=True)
     val_ds   = OxfordIIITPetDataset(args.data_root, split="val",   require_bbox=True)
     pin      = device.type == "cuda"
@@ -321,11 +321,10 @@ def train_localizer(args, device):
     val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False,
                           num_workers=args.num_workers, pin_memory=pin)
 
-    model = VGG11Localizer(dropout_p=args.dropout_p).to(device)
+    model = VGG11Localizer(dropout_p=0.2).to(device)   # fixed at 0.2, not args.dropout_p
 
     # ------------------------------------------------------------------
-    # Load pretrained encoder weights, then freeze the entire encoder.
-    # Only the regression head (randomly initialised) will be trained.
+    # Load pretrained encoder weights from classifier checkpoint.
     # ------------------------------------------------------------------
     cls_ckpt_path = "checkpoints/classifier.pth"
     if os.path.exists(cls_ckpt_path):
@@ -336,29 +335,34 @@ def train_localizer(args, device):
         model.encoder.load_state_dict(enc_w, strict=False)
         print("Loaded encoder weights from classifier checkpoint.")
 
+    # Freeze entire encoder first, then unfreeze only block5 so the last
+    # conv features can adapt to spatial regression with a small LR.
     model.freeze_encoder()
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total     = sum(p.numel() for p in model.parameters())
-    print(f"Encoder frozen — trainable params: {trainable:,} / {total:,} (head only)")
+    model.unfreeze_last_block()
+
+    head_params    = list(model.reg_head.parameters())
+    block5_params  = list(model.encoder.block5.parameters())
+    frozen_params  = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    trainable      = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total          = sum(p.numel() for p in model.parameters())
+    print(f"Trainable: {trainable:,} / {total:,}  (head + block5 | frozen: {frozen_params:,})")
 
     # ------------------------------------------------------------------
-    # Loss: IoU + 0.5 × SmoothL1, both in pixel space
+    # Loss: IoU + 0.5 x SmoothL1 (normalised by 224 so both terms ~[0,1])
     # ------------------------------------------------------------------
-    loc_loss  = CombinedLocLoss(lambda_l1=0.5)
+    loc_loss = CombinedLocLoss(lambda_l1=0.5)
 
-    # All trainable params belong to the head — use a single LR
-    optimizer = optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=args.lr,
-        weight_decay=1e-4,
-    )
-    # Cosine schedule works well when the head is trained from scratch
+    # Differential LR: block5 at lr/10, regression head at full lr
+    optimizer = optim.AdamW([
+        {"params": block5_params, "lr": args.lr * 0.1},
+        {"params": head_params,   "lr": args.lr},
+    ], weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     # ------------------------------------------------------------------
-    # Checkpoint based on best validation IoU
+    # Save checkpoint based on Acc@IoU=0.5 — the exact Gradescope metric.
     # ------------------------------------------------------------------
-    best_val_iou = 0.0
+    best_val_acc = 0.0
     os.makedirs("checkpoints", exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
@@ -373,8 +377,8 @@ def train_localizer(args, device):
             loss  = loc_loss(pred, boxes)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
-                filter(lambda p: p.requires_grad, model.parameters()),
-                max_norm=1.0,   # gradient clipping to stabilise head training
+                [p for p in model.parameters() if p.requires_grad],
+                max_norm=2.0,
             )
             optimizer.step()
             train_loss    += loss.item() * imgs.size(0)
@@ -409,24 +413,23 @@ def train_localizer(args, device):
             f"val_loss={val_loss:.4f} val_iou={val_iou:.4f} val_acc@0.5={val_acc:.4f}"
         )
 
-        # Save checkpoint when val_iou improves
-        if val_iou > best_val_iou:
-            best_val_iou = val_iou
+        # Save when Acc@IoU=0.5 improves — this is the exact Gradescope metric
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
             torch.save(
                 {
-                    "state_dict":   model.state_dict(),
-                    "epoch":        epoch,
-                    "best_metric":  best_val_iou,
-                    "val_iou":      val_iou,
+                    "state_dict":    model.state_dict(),
+                    "epoch":         epoch,
+                    "best_metric":   best_val_acc,
                     "val_acc_iou50": val_acc,
+                    "val_iou":       val_iou,
                 },
                 "checkpoints/localizer.pth",
             )
-            print(f"  ✅ Saved best checkpoint (val_iou = {best_val_iou:.4f}, Acc@IoU=0.5 = {val_acc:.4f})")
-            # Upload immediately to Google Drive so it survives session timeout
+            print(f"  Saved best checkpoint (Acc@IoU=0.5 = {best_val_acc:.4f}, val_iou = {val_iou:.4f})")
             save_to_drive("localizer.pth")
 
-    print(f"Best localizer val_iou: {best_val_iou:.4f}")
+    print(f"Best localizer Acc@IoU=0.5: {best_val_acc:.4f}")
 
 
 def train_unet(args, device):

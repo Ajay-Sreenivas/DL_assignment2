@@ -11,7 +11,7 @@ from .layers import CustomDropout
 
 # Drive IDs — fill these in after uploading your checkpoints to Google Drive
 CLASSIFIER_DRIVE_ID = "128xX5UlMk5k_jzx5HQFzc9VopEl8DhCE"
-LOCALIZER_DRIVE_ID  = "1p-Ns0vBfOG5Mh0Oux0BpfTNXm5YTta_U"
+LOCALIZER_DRIVE_ID  = "1PKsvcf_G5mYZAL-eKXKNPdtN9EOQno2_"
 UNET_DRIVE_ID       = "1KD1DcLiMNEjrp9mZnQG_avIwnxY1pHUE"
 
 
@@ -90,28 +90,18 @@ class MultiTaskPerceptionModel(nn.Module):
             nn.Linear(4096, num_breeds),
         )
 
-        # --- Localisation head (FC-based, matches VGG11Localizer.reg_head architecture) ---
-        # Architecture: 25088 → 2048 → 1024 → 512 → 256 → 4
-        # Dropout at every hidden layer (including pre-output 256) for regularisation.
-        # Output: (cx, cy, w, h) in pixel space via ReLU (matches localizer exactly)
+        # --- Localisation head (matches VGG11Localizer.reg_head exactly) ---
+        # Architecture: 25088 -> 1024 -> 256 -> 4
+        # Single Dropout(0.2) after first layer, ReLU output (pixel space)
         self.loc_head = nn.Sequential(
-            nn.Flatten(),                        # [B, 25088]
-            nn.Linear(512 * 7 * 7, 2048),        # reduced from 4096 → less memorisation
-            nn.BatchNorm1d(2048),
-            nn.ReLU(inplace=True),
-            CustomDropout(p=0.5),
-            nn.Linear(2048, 1024),
+            nn.Flatten(),
+            nn.Linear(512 * 7 * 7, 1024),
             nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
-            CustomDropout(p=0.5),
-            nn.Linear(1024, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            CustomDropout(p=0.5),
-            nn.Linear(512, 256),
+            CustomDropout(p=0.2),
+            nn.Linear(1024, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
-            # no dropout here — let the last hidden layer pass signal cleanly
             nn.Linear(256, 4),
             nn.ReLU(),                           # non-negative pixel coordinates
         )
