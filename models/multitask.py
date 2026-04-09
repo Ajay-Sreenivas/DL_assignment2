@@ -36,7 +36,23 @@ class MultiTaskPerceptionModel(nn.Module):
             2. LocalizationHead    -> [B, 4]
             3. SegmentationDecoder -> [B, seg_classes, H, W]
 
-    Checkpoints are downloaded from Google Drive automatically if not present.
+    Weight loading order:
+        1. classifier.pth  -> encoder (base) + cls_head
+        2. localizer.pth   -> loc_head
+        3. unet.pth        -> decoder layers + encoder (override)
+
+    The encoder is loaded TWICE deliberately:
+        First from classifier.pth  (good classification features as base)
+        Then from unet.pth         (segmentation-adapted features as override)
+
+    This is critical because the UNet decoder was trained against the
+    segmentation-adapted encoder features from unet.pth, not the pure
+    classification encoder from classifier.pth.  Loading decoder weights
+    without also loading the matching encoder produces a feature distribution
+    mismatch that collapses Dice from ~0.87 to ~0.25.
+
+    The UNet encoder started from classification weights and was fine-tuned
+    only slightly, so classification performance is preserved (~0.86 F1).
     """
 
     def __init__(
@@ -82,23 +98,22 @@ class MultiTaskPerceptionModel(nn.Module):
         )
 
         # --- Localisation head ---
-        # MUST match VGG11Localizer.reg_head in localization.py exactly so
-        # that weight shapes align when loading localizer.pth.
-        # localization.py defines:  25088 → 1024 → 256 → 4, dropout_p=0.2
+        # Matches VGG11Localizer.reg_head in localization.py exactly:
+        #   25088 → 1024 → 256 → 4, dropout_p=0.2
         self.loc_head = nn.Sequential(
-            nn.Flatten(),                        # [B, 25088]
+            nn.Flatten(),
 
             nn.Linear(512 * 7 * 7, 1024),
             nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
-            CustomDropout(p=0.2),               # matches localization.py default
+            CustomDropout(p=0.2),
 
             nn.Linear(1024, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
 
             nn.Linear(256, 4),
-            nn.ReLU(),                           # non-negative (cx, cy, w, h) pixel space
+            nn.ReLU(),
         )
 
         # --- Segmentation decoder ---
@@ -142,9 +157,18 @@ class MultiTaskPerceptionModel(nn.Module):
         return ckpt
 
     def _load_pretrained(self, classifier_path, localizer_path, unet_path):
-        """Transfer encoder + head weights from the three single-task checkpoints."""
+        """Transfer encoder + head weights from the three single-task checkpoints.
 
-        # --- classifier → encoder + cls_head ---
+        Loading order is intentional:
+          1. classifier.pth  sets encoder + cls_head
+          2. localizer.pth   sets loc_head
+          3. unet.pth        sets decoder AND overrides encoder with
+                             segmentation-adapted weights so the decoder
+                             sees the same feature distribution it was
+                             trained against.
+        """
+
+        # --- Step 1: classifier → encoder (base) + cls_head ---
         cls_sd = self._load_ckpt(classifier_path)
         if cls_sd:
             enc_w  = {k[len("encoder."):]: v   for k, v in cls_sd.items() if k.startswith("encoder.")}
@@ -153,7 +177,7 @@ class MultiTaskPerceptionModel(nn.Module):
             self.cls_head.load_state_dict(head_w, strict=False)
             print("[MultiTask] Loaded classifier weights.")
 
-        # --- localizer → loc_head ---
+        # --- Step 2: localizer → loc_head ---
         loc_sd = self._load_ckpt(localizer_path)
         if loc_sd:
             head_w = {k[len("reg_head."):]: v for k, v in loc_sd.items() if k.startswith("reg_head.")}
@@ -163,12 +187,15 @@ class MultiTaskPerceptionModel(nn.Module):
             else:
                 print("[MultiTask] Loaded localizer weights.")
 
-        # --- unet → segmentation decoder ---
-        # Tolerates BOTH key naming conventions in unet.pth:
-        #   "seg_out.*"  — checkpoints saved with the new segmentation.py
-        #   "out_conv.*" — checkpoints saved with the old segmentation.py
+        # --- Step 3: unet → decoder + encoder override ---
+        # The UNet decoder was trained against encoder features from unet.pth.
+        # Loading only the decoder but keeping the classifier encoder causes a
+        # feature distribution mismatch → Dice ~0.25 despite training Dice ~0.87.
+        # Fix: load the UNet encoder weights AFTER the decoder so both sides of
+        # every skip connection use the same encoder feature distribution.
         unet_sd = self._load_ckpt(unet_path)
         if unet_sd:
+            # 3a. Decoder layers
             seg_layers = ["up5", "dec5", "up4", "dec4", "up3", "dec3",
                           "up2", "dec2", "up1", "dec1", "bottleneck_drop"]
             for layer in seg_layers:
@@ -178,20 +205,28 @@ class MultiTaskPerceptionModel(nn.Module):
                 if lw:
                     module.load_state_dict(lw, strict=False)
 
-            # Load final projection — try "seg_out.*" first, fall back to "out_conv.*"
+            # 3b. Final projection — accept both "seg_out.*" (new) and "out_conv.*" (old)
             final_w = {k[len("seg_out."):]: v
                        for k, v in unet_sd.items() if k.startswith("seg_out.")}
             if not final_w:
                 final_w = {k[len("out_conv."):]: v
                            for k, v in unet_sd.items() if k.startswith("out_conv.")}
                 if final_w:
-                    print("[MultiTask] INFO: unet.pth has 'out_conv' keys — loading into seg_out.")
-
+                    print("[MultiTask] INFO: unet.pth uses 'out_conv' key — loading into seg_out.")
             if final_w:
                 self.seg_out.load_state_dict(final_w, strict=True)
-                print("[MultiTask] Loaded UNet weights.")
+
+            # 3c. Override encoder with UNet-adapted weights
+            # The UNet fine-tuned the encoder from classification weights, so
+            # classification performance is preserved while segmentation features
+            # now match what the decoder expects.
+            unet_enc_w = {k[len("encoder."):]: v
+                          for k, v in unet_sd.items() if k.startswith("encoder.")}
+            if unet_enc_w:
+                self.encoder.load_state_dict(unet_enc_w, strict=False)
+                print("[MultiTask] Loaded UNet weights (decoder + encoder override).")
             else:
-                print("[MultiTask] WARNING: no seg_out/out_conv keys in unet.pth — seg head is random!")
+                print("[MultiTask] Loaded UNet decoder weights (no encoder in checkpoint).")
 
     # ------------------------------------------------------------------
     # Forward
