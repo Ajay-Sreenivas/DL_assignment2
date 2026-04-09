@@ -17,7 +17,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score
 from tqdm import tqdm
-import wandb
+# import wandb  # disabled
 
 from data.pets_dataset import OxfordIIITPetDataset
 from models import (
@@ -246,14 +246,7 @@ def train_classifier(args, device):
         val_acc   = val_correct / val_total
         val_f1    = f1_score(all_labels, all_preds, average="macro", zero_division=0)
 
-        wandb.log({
-            "cls/train_loss":    train_loss,
-            "cls/train_acc":     train_acc,
-            "cls/val_loss":      val_loss,
-            "cls/val_acc":       val_acc,
-            "cls/val_macro_f1":  val_f1,
-            "epoch": epoch,
-        })
+        pass  # wandb.log disabled
         print(f"[Classifier] Epoch {epoch}/{args.epochs} | train_loss={train_loss:.4f} train_acc={train_acc:.4f} | val_loss={val_loss:.4f} val_acc={val_acc:.4f} val_f1={val_f1:.4f}")
 
         if val_f1 > best_f1:
@@ -409,14 +402,7 @@ def train_localizer(args, device):
         val_iou   = val_iou_sum  / nv
         val_acc   = val_acc_sum  / nv      # Acc@IoU=0.5 — the Gradescope metric
 
-        wandb.log({
-            "loc/train_loss":    train_loss,
-            "loc/train_iou":     train_iou,
-            "loc/val_loss":      val_loss,
-            "loc/val_iou":       val_iou,
-            "loc/val_acc_iou50": val_acc,   # primary metric for checkpoint
-            "epoch": epoch,
-        })
+        pass  # wandb.log disabled
         print(
             f"[Localizer] Epoch {epoch}/{args.epochs} | "
             f"train_loss={train_loss:.4f} train_iou={train_iou:.4f} | "
@@ -501,13 +487,7 @@ def train_unet(args, device):
                 nv           += imgs.size(0)
         val_loss /= nv; val_dice = val_dice_sum / nv
 
-        wandb.log({
-            "seg/train_loss": train_loss,
-            "seg/train_dice": train_dice,
-            "seg/val_loss":   val_loss,
-            "seg/val_dice":   val_dice,
-            "epoch": epoch,
-        })
+        pass  # wandb.log disabled
         print(f"[UNet] Epoch {epoch}/{args.epochs} | train_loss={train_loss:.4f} train_dice={train_dice:.4f} | val_loss={val_loss:.4f} val_dice={val_dice:.4f}")
 
         if val_dice > best_dice:
@@ -569,13 +549,7 @@ def train_multitask(args, device):
             metrics["n"]        += bs
         scheduler.step()
         n = metrics["n"]
-        wandb.log({
-            "mt/train_cls_loss":   metrics["cls_loss"] / n,
-            "mt/train_loc_loss":   metrics["loc_loss"] / n,
-            "mt/train_seg_loss":   metrics["seg_loss"] / n,
-            "mt/train_total_loss": metrics["total"] / n,
-            "epoch": epoch,
-        })
+        pass  # wandb.log disabled
         print(f"[MultiTask] Epoch {epoch}/{args.epochs} | total={metrics['total']/n:.4f}")
 
         # --- Validation ---
@@ -604,13 +578,7 @@ def train_multitask(args, device):
         val_f1    = f1_score(all_labels_mt, all_preds_mt, average="macro", zero_division=0)
         combined  = (val_f1 + val_iou + val_dice) / 3
 
-        wandb.log({
-            "mt/val_acc":      val_acc,
-            "mt/val_macro_f1": val_f1,
-            "mt/val_iou":      val_iou,
-            "mt/val_dice":     val_dice,
-            "epoch": epoch,
-        })
+        pass  # wandb.log disabled
         print(f"  val_acc={val_acc:.4f} val_f1={val_f1:.4f} val_iou={val_iou:.4f} val_dice={val_dice:.4f}")
 
         if combined > best_combined:
@@ -646,12 +614,7 @@ if __name__ == "__main__":
     args   = parse_args()
     device = torch.device(args.device)
 
-    wandb.init(
-        project=args.wandb_project,
-        entity=args.wandb_entity,
-        config=vars(args),
-        name=f"task_{args.task}",
-    )
+    # wandb.init disabled
 
     if args.task == "all":
         train_classifier(args, device)
@@ -675,4 +638,4 @@ if __name__ == "__main__":
         train_multitask(args, device)
         copy_to_kaggle_output("multitask.pth")
 
-    wandb.finish()
+    # wandb.finish()  # disabled
