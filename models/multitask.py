@@ -93,6 +93,14 @@ class MultiTaskPerceptionModel(nn.Module):
         # while self.encoder (from classifier.pth) serves cls + loc.
         self.seg_encoder = VGG11Encoder(in_channels=in_channels)
 
+        # --- Localization encoder (separate from shared encoder) ---
+        # train_localizer unfreezes block5 and fine-tunes it, so localizer.pth
+        # block5 differs from classifier.pth block5.  reg_head was trained
+        # against the fine-tuned block5 features — if we feed it classifier
+        # block5 features instead, it outputs garbage (Acc@IoU = 0.0%).
+        # A dedicated loc_encoder loaded from localizer.pth fixes this.
+        self.loc_encoder = VGG11Encoder(in_channels=in_channels)
+
         # --- Classification head ---
         self.cls_head = nn.Sequential(
             nn.Flatten(),
@@ -187,10 +195,20 @@ class MultiTaskPerceptionModel(nn.Module):
             self.cls_head.load_state_dict(head_w, strict=False)
             print("[MultiTask] Loaded classifier weights.")
 
-        # --- Step 2: localizer → loc_head ---
+        # --- Step 2: localizer → loc_encoder + loc_head ---
+        # loc_encoder is loaded with localizer.pth encoder weights so that
+        # loc_head receives the same block5 features it was trained against.
         loc_sd = self._load_ckpt(localizer_path)
         if loc_sd:
-            head_w = {k[len("reg_head."):]: v for k, v in loc_sd.items() if k.startswith("reg_head.")}
+            # 2a. Localizer encoder (contains fine-tuned block5)
+            loc_enc_w = {k[len("encoder."):]: v
+                         for k, v in loc_sd.items() if k.startswith("encoder.")}
+            if loc_enc_w:
+                self.loc_encoder.load_state_dict(loc_enc_w, strict=False)
+
+            # 2b. Regression head
+            head_w = {k[len("reg_head."):]: v
+                      for k, v in loc_sd.items() if k.startswith("reg_head.")}
             missing, unexpected = self.loc_head.load_state_dict(head_w, strict=False)
             if missing:
                 print(f"[MultiTask] WARNING: localizer missing keys ({len(missing)}): {missing[:2]}")
@@ -248,11 +266,16 @@ class MultiTaskPerceptionModel(nn.Module):
               'localization'   — [B, 4] (cx, cy, w, h) in pixel space
               'segmentation'   — [B, seg_classes, H, W] logits
         """
-        # Classification + localisation use the shared (classifier) encoder
+        # Classification uses the shared (classifier) encoder
         bottleneck, _ = self.encoder(x, return_features=True)
         pooled  = self.avgpool(bottleneck)
         cls_out = self.cls_head(pooled)          # [B, num_breeds]
-        loc_out = self.loc_head(pooled)          # [B, 4] pixel space
+
+        # Localization uses the dedicated loc_encoder (fine-tuned block5)
+        # so reg_head sees the same feature distribution it was trained against
+        loc_bottleneck = self.loc_encoder(x)
+        loc_pooled = self.avgpool(loc_bottleneck)
+        loc_out = self.loc_head(loc_pooled)      # [B, 4] pixel space
 
         # Segmentation uses the dedicated seg_encoder (UNet-adapted weights)
         # so the decoder skip connections see the feature distribution they

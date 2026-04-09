@@ -335,28 +335,24 @@ def train_localizer(args, device):
         model.encoder.load_state_dict(enc_w, strict=False)
         print("Loaded encoder weights from classifier checkpoint.")
 
-    # Freeze entire encoder first, then unfreeze only block5 so the last
-    # conv features can adapt to spatial regression with a small LR.
+    # Freeze entire encoder — keeps weights identical to classifier.pth so
+    # the multitask shared encoder works for both classification and localisation.
     model.freeze_encoder()
-    model.unfreeze_last_block()
 
-    head_params    = list(model.reg_head.parameters())
-    block5_params  = list(model.encoder.block5.parameters())
-    frozen_params  = sum(p.numel() for p in model.parameters() if not p.requires_grad)
-    trainable      = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total          = sum(p.numel() for p in model.parameters())
-    print(f"Trainable: {trainable:,} / {total:,}  (head + block5 | frozen: {frozen_params:,})")
+    head_params = list(model.reg_head.parameters())
+    trainable   = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total       = sum(p.numel() for p in model.parameters())
+    print(f"Encoder fully frozen — trainable: {trainable:,} / {total:,} (head only)")
 
     # ------------------------------------------------------------------
     # Loss: IoU + 0.5 x SmoothL1 (normalised by 224 so both terms ~[0,1])
     # ------------------------------------------------------------------
     loc_loss = CombinedLocLoss(lambda_l1=0.5)
 
-    # Differential LR: block5 at lr/10, regression head at full lr
-    optimizer = optim.AdamW([
-        {"params": block5_params, "lr": args.lr * 0.1},
-        {"params": head_params,   "lr": args.lr},
-    ], weight_decay=1e-4)
+    optimizer = optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr, weight_decay=1e-4,
+    )
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     # ------------------------------------------------------------------
