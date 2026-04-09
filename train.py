@@ -230,8 +230,11 @@ def _acc_at_iou(pred_boxes: "torch.Tensor",
 
 
 def train_localizer(args, device):
-    train_ds = OxfordIIITPetDataset(args.data_root, split="train")
-    val_ds   = OxfordIIITPetDataset(args.data_root, split="val")
+    # require_bbox=True filters out the ~50 % of Oxford-IIIT Pet images that
+    # have no XML annotation, preventing fake whole-image fallback boxes from
+    # poisoning the training signal.
+    train_ds = OxfordIIITPetDataset(args.data_root, split="train", require_bbox=True)
+    val_ds   = OxfordIIITPetDataset(args.data_root, split="val",   require_bbox=True)
     pin      = device.type == "cuda"
     train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                           num_workers=args.num_workers, pin_memory=pin)

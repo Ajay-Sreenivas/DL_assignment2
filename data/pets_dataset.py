@@ -109,13 +109,29 @@ def get_transforms(split: str = "train"):
 class OxfordIIITPetDataset(Dataset):
     """Oxford-IIIT Pet multi-task dataset loader.
 
-    Directory layout expected:
+    Directory layout expected::
+
         root/
             images/           *.jpg
             annotations/
                 list.txt      (filename, class_id, species, breed_id)
-                xmls/         *.xml  (head bounding boxes)
+                xmls/         *.xml  (head bounding boxes — ONLY ~50 % of images)
                 trimaps/      *.png  (segmentation masks)
+
+    .. important::
+        The Oxford-IIIT Pet dataset ships bounding-box XMLs only for the
+        *trainval* VOC split (~3 686 images out of 7 349 total).  The
+        remaining ~3 663 images have **no XML file at all**.
+
+        The old fallback ``bboxes = [[0, 0, 1, 1]]`` (whole image) silently
+        poisoned ~50 % of localiser training samples with incorrect labels,
+        causing the model to partially learn "predict image centre" and
+        severely hurting generalisation on the held-out test set.
+
+        Set ``require_bbox=True`` (default for localiser) to drop every
+        sample that has no corresponding XML file **before** the train/val
+        split is applied.  This gives a clean ~3 686-image subset where
+        every label is real.
 
     Bounding boxes in the XML files use absolute pixel coordinates
     (xmin, ymin, xmax, ymax). We convert to (x_center, y_center, width, height)
@@ -125,13 +141,25 @@ class OxfordIIITPetDataset(Dataset):
     We map these to class indices 0/1/2 for CrossEntropy.
     """
 
-    def __init__(self, root: str, split: str = "train", val_fraction: float = 0.15, seed: int = 42):
+    def __init__(
+        self,
+        root: str,
+        split: str = "train",
+        val_fraction: float = 0.15,
+        seed: int = 42,
+        require_bbox: bool = False,
+    ):
         """
         Args:
             root:          Path to the dataset root directory.
             split:         'train' | 'val' | 'test'
             val_fraction:  Fraction of training data to hold out as validation.
             seed:          Random seed for reproducible splits.
+            require_bbox:  If True, discard every sample that has no XML
+                           bounding-box annotation **before** splitting into
+                           train/val.  Always pass ``require_bbox=True`` when
+                           training or evaluating the localiser so that no
+                           fake whole-image fallback boxes pollute the labels.
         """
         super().__init__()
         self.root   = root
@@ -145,6 +173,23 @@ class OxfordIIITPetDataset(Dataset):
         # Parse list.txt
         list_path = os.path.join(root, "annotations", "list.txt")
         self.samples = self._parse_list(list_path)
+
+        # ------------------------------------------------------------------
+        # KEY FIX: drop samples with no bounding-box XML before splitting.
+        # Without this, ~50 % of samples get a fake [0,0,1,1] whole-image
+        # bbox that trains the model to predict the image centre.
+        # ------------------------------------------------------------------
+        if require_bbox:
+            before = len(self.samples)
+            self.samples = [
+                s for s in self.samples
+                if os.path.exists(os.path.join(self.xml_dir, s["name"] + ".xml"))
+            ]
+            after = len(self.samples)
+            print(
+                f"[Dataset] require_bbox=True: kept {after}/{before} samples "
+                f"that have XML annotations ({before - after} dropped)."
+            )
 
         # Reproducible train / val split
         rng = np.random.default_rng(seed)
@@ -220,7 +265,11 @@ class OxfordIIITPetDataset(Dataset):
             bbox_norm = [xmin / orig_w, ymin / orig_h, xmax / orig_w, ymax / orig_h]
             bboxes = [bbox_norm]
         else:
-            bboxes = [[0.0, 0.0, 1.0, 1.0]]  # fallback: whole image
+            # No XML annotation: use whole-image box as a safe fallback for
+            # classification / segmentation tasks that don't use the bbox.
+            # The localiser task should never reach here because OxfordIIITPetDataset
+            # is constructed with require_bbox=True, which drops these samples.
+            bboxes = [[0.0, 0.0, 1.0, 1.0]]
 
         # --- Segmentation mask ---
         trimap_path = os.path.join(self.trimap_dir, name + ".png")
