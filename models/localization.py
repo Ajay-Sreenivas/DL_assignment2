@@ -23,8 +23,9 @@ class VGG11Localizer(nn.Module):
     first FC layer.  Fewer layers = fewer things to overfit.
     BatchNorm at each hidden layer provides sufficient regularisation.
 
-    Output activation: ReLU.
-    Bounding-box coordinates are non-negative pixel values in [0, IMAGE_SIZE].
+    Output activation: Sigmoid + Scaling.
+    Bounding-box coordinates are mapped to [0, 1] via Sigmoid, then
+    scaled by IMAGE_SIZE to strictly bind them to [0, 224] pixel space.
     """
 
     def __init__(self, in_channels: int = 3, dropout_p: float = 0.2):
@@ -40,7 +41,7 @@ class VGG11Localizer(nn.Module):
         # ------------------------------------------------------------------
         # Compact MLP regression head
         # Input:  512 x 7 x 7 = 25,088 flattened features
-        # Output: 4 non-negative values (cx, cy, w, h) in pixel space
+        # Output: 4 constrained values (cx, cy, w, h) in pixel space
         # ------------------------------------------------------------------
         self.reg_head = nn.Sequential(
             nn.Flatten(),                        # [B, 25088]
@@ -55,7 +56,7 @@ class VGG11Localizer(nn.Module):
             nn.ReLU(inplace=True),
 
             nn.Linear(256, 4),
-            nn.ReLU(),                           # non-negative pixel coordinates
+            nn.Sigmoid(),                        # Bounds output strictly to [0.0, 1.0]
         )
 
     def freeze_encoder(self) -> None:
@@ -66,9 +67,6 @@ class VGG11Localizer(nn.Module):
     def unfreeze_last_block(self) -> None:
         """Unfreeze encoder.block5 so the last conv features can adapt
         to localisation with a small learning rate.
-
-        Call AFTER freeze_encoder(). Only block5 is unfrozen; blocks 1-4
-        stay frozen, keeping low-level features stable.
         """
         for p in self.encoder.block5.parameters():
             p.requires_grad = True
@@ -81,4 +79,7 @@ class VGG11Localizer(nn.Module):
         """
         features = self.encoder(x)           # [B, 512, 7, 7]
         features = self.avgpool(features)    # [B, 512, 7, 7]
-        return self.reg_head(features)       # [B, 4]  pixel space
+        out = self.reg_head(features)        # [B, 4] in [0, 1]
+        
+        # Scale to [0, 224] so the loss function and metrics interact with proper pixel coordinates
+        return out * IMAGE_SIZE

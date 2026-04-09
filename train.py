@@ -312,7 +312,6 @@ def _acc_at_iou(pred_boxes: "torch.Tensor",
 
 def train_localizer(args, device):
     # Only images that have a matching .xml annotation are used for training.
-    # Same base name: images/Abyssinian_1.jpg <-> annotations/xmls/Abyssinian_1.xml
     train_ds = OxfordIIITPetDataset(args.data_root, split="train", require_bbox=True)
     val_ds   = OxfordIIITPetDataset(args.data_root, split="val",   require_bbox=True)
     pin      = device.type == "cuda"
@@ -355,9 +354,6 @@ def train_localizer(args, device):
     )
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    # ------------------------------------------------------------------
-    # Save checkpoint based on Acc@IoU=0.5 — the exact Gradescope metric.
-    # ------------------------------------------------------------------
     best_val_acc = 0.0
     os.makedirs("checkpoints", exist_ok=True)
 
@@ -367,10 +363,19 @@ def train_localizer(args, device):
         train_loss = 0.0; train_iou_sum = 0.0; n = 0
         for batch in tqdm(train_dl, desc=f"[Localizer] Epoch {epoch}/{args.epochs} train", leave=False):
             imgs  = batch["image"].to(device)
-            boxes = batch["bbox"].to(device)          # [B, 4] pixel space
+            boxes = batch["bbox"].to(device)          # Raw dataset gives [x1, y1, x2, y2]
+            
+            # CRITICAL FIX: Convert [x1, y1, x2, y2] to [cx, cy, w, h] to match model output & metric expectations
+            x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
+            w = x2 - x1
+            h = y2 - y1
+            boxes_cxcywh = torch.stack([cx, cy, w, h], dim=1)
+
             optimizer.zero_grad()
-            pred  = model(imgs)                       # [B, 4] pixel space
-            loss  = loc_loss(pred, boxes)
+            pred  = model(imgs)                       # [B, 4] pixel space (cx, cy, w, h)
+            loss  = loc_loss(pred, boxes_cxcywh)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
                 [p for p in model.parameters() if p.requires_grad],
@@ -378,7 +383,7 @@ def train_localizer(args, device):
             )
             optimizer.step()
             train_loss    += loss.item() * imgs.size(0)
-            train_iou_sum += compute_iou(pred.detach(), boxes) * imgs.size(0)
+            train_iou_sum += compute_iou(pred.detach(), boxes_cxcywh) * imgs.size(0)
             n             += imgs.size(0)
         scheduler.step()
         train_loss /= n
@@ -391,25 +396,33 @@ def train_localizer(args, device):
             for batch in tqdm(val_dl, desc=f"[Localizer] Epoch {epoch}/{args.epochs} val", leave=False):
                 imgs  = batch["image"].to(device)
                 boxes = batch["bbox"].to(device)
+                
+                # Convert targets for validation batch as well
+                x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+                cx = (x1 + x2) / 2.0
+                cy = (y1 + y2) / 2.0
+                w = x2 - x1
+                h = y2 - y1
+                boxes_cxcywh = torch.stack([cx, cy, w, h], dim=1)
+
                 pred  = model(imgs)
-                loss  = loc_loss(pred, boxes)
+                loss  = loc_loss(pred, boxes_cxcywh)
                 bs = imgs.size(0)
                 val_loss    += loss.item() * bs
-                val_iou_sum += compute_iou(pred, boxes) * bs
-                val_acc_sum += _acc_at_iou(pred, boxes, threshold=0.5) * bs
+                val_iou_sum += compute_iou(pred, boxes_cxcywh) * bs
+                val_acc_sum += _acc_at_iou(pred, boxes_cxcywh, threshold=0.5) * bs
                 nv          += bs
         val_loss /= nv
         val_iou   = val_iou_sum  / nv
         val_acc   = val_acc_sum  / nv      # Acc@IoU=0.5 — the Gradescope metric
 
-        pass  # wandb.log disabled
+        # wandb.log disabled
         print(
             f"[Localizer] Epoch {epoch}/{args.epochs} | "
             f"train_loss={train_loss:.4f} train_iou={train_iou:.4f} | "
             f"val_loss={val_loss:.4f} val_iou={val_iou:.4f} val_acc@0.5={val_acc:.4f}"
         )
 
-        # Save when Acc@IoU=0.5 improves — this is the exact Gradescope metric
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             torch.save(
