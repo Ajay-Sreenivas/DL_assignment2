@@ -9,7 +9,7 @@ from .vgg11 import VGG11Encoder
 from .layers import CustomDropout
 
 
-# ── Google Drive checkpoint IDs ───────────────────────────────────────────────
+
 CLASSIFIER_DRIVE_ID = "128xX5UlMk5k_jzx5HQFzc9VopEl8DhCE"
 LOCALIZER_DRIVE_ID  = "1p-Ns0vBfOG5Mh0Oux0BpfTNXm5YTta_U"
 UNET_DRIVE_ID       = "1KD1DcLiMNEjrp9mZnQG_avIwnxY1pHUE"
