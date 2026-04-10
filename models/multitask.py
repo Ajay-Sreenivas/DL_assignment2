@@ -9,11 +9,11 @@ from .vgg11 import VGG11Encoder
 from .layers import CustomDropout
 
 
-
+# ── Google Drive checkpoint IDs ───────────────────────────────────────────────
 CLASSIFIER_DRIVE_ID = "128xX5UlMk5k_jzx5HQFzc9VopEl8DhCE"
 LOCALIZER_DRIVE_ID  = "1p-Ns0vBfOG5Mh0Oux0BpfTNXm5YTta_U"
 UNET_DRIVE_ID       = "1KD1DcLiMNEjrp9mZnQG_avIwnxY1pHUE"
-
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _double_conv(in_c: int, out_c: int) -> nn.Sequential:
@@ -74,10 +74,14 @@ class MultiTaskPerceptionModel(nn.Module):
             (UNET_DRIVE_ID,       unet_path),
         ]:
             if os.path.exists(out_path):
-                print(f"[MultiTask] Checkpoint already exists, skipping download: {out_path}")
+                size_mb = os.path.getsize(out_path) / (1024 * 1024)
+                print(f"[MultiTask] Checkpoint already exists ({size_mb:.1f}MB): {out_path}")
             else:
                 print(f"[MultiTask] Downloading checkpoint to {out_path} ...")
                 gdown.download(id=drive_id, output=out_path, quiet=False)
+                if os.path.exists(out_path):
+                    size_mb = os.path.getsize(out_path) / (1024 * 1024)
+                    print(f"[MultiTask] Downloaded {os.path.basename(out_path)}: {size_mb:.1f}MB")
 
         # --- Shared backbone (classification + localisation) ---
         self.encoder = VGG11Encoder(in_channels=in_channels)
@@ -93,13 +97,17 @@ class MultiTaskPerceptionModel(nn.Module):
         # while self.encoder (from classifier.pth) serves cls + loc.
         self.seg_encoder = VGG11Encoder(in_channels=in_channels)
 
-        # --- Localization encoder (separate from shared encoder) ---
-        # train_localizer unfreezes block5 and fine-tunes it, so localizer.pth
-        # block5 differs from classifier.pth block5.  reg_head was trained
-        # against the fine-tuned block5 features — if we feed it classifier
-        # block5 features instead, it outputs garbage (Acc@IoU = 0.0%).
-        # A dedicated loc_encoder loaded from localizer.pth fixes this.
+        # --- Localization encoder ---
+        # PyTorch BatchNorm running_mean/running_var (buffers) are updated
+        # during every forward pass even when requires_grad=False (frozen).
+        # After localizer training, encoder BN running stats differ from
+        # classifier.pth.  loc_head was calibrated against LOCALIZER running
+        # stats.  Using classifier encoder (different stats) corrupts features:
+        # 25,088 slightly-wrong values aggregate through Linear(25088,1024),
+        # BN normalization shifts, ReLU saturates to zero, output=[0,0,0,0].
+        # loc_encoder carries the correct localizer BN running stats.
         self.loc_encoder = VGG11Encoder(in_channels=in_channels)
+
 
         # --- Classification head ---
         self.cls_head = nn.Sequential(
@@ -195,25 +203,38 @@ class MultiTaskPerceptionModel(nn.Module):
             self.cls_head.load_state_dict(head_w, strict=False)
             print("[MultiTask] Loaded classifier weights.")
 
-        # --- Step 2: localizer → loc_encoder + loc_head ---
-        # loc_encoder is loaded with localizer.pth encoder weights so that
-        # loc_head receives the same block5 features it was trained against.
+        # --- Step 2: localizer → loc_encoder (BN running stats) + loc_head ---
+        # IMPORTANT: update LOCALIZER_DRIVE_ID above whenever you retrain
+        # and upload a new localizer.pth to Google Drive.
         loc_sd = self._load_ckpt(localizer_path)
         if loc_sd:
-            # 2a. Localizer encoder (contains fine-tuned block5)
+            # 2a. Load localizer encoder into loc_encoder.
+            # This carries the correct BN running_mean/running_var that loc_head
+            # was calibrated against.  Without this, features fed to loc_head
+            # come from the classifier encoder (different running stats) and the
+            # BN normalization inside loc_head collapses predictions to zeros.
             loc_enc_w = {k[len("encoder."):]: v
                          for k, v in loc_sd.items() if k.startswith("encoder.")}
             if loc_enc_w:
-                self.loc_encoder.load_state_dict(loc_enc_w, strict=False)
+                missing_enc, _ = self.loc_encoder.load_state_dict(loc_enc_w, strict=False)
+                if missing_enc:
+                    print(f"[MultiTask] WARNING: loc_encoder missing {len(missing_enc)} keys")
+                else:
+                    print(f"[MultiTask] Loaded loc_encoder ({len(loc_enc_w)} tensors).")
+            else:
+                print("[MultiTask] WARNING: no encoder keys in localizer.pth — loc_encoder is random!")
 
-            # 2b. Regression head
+            # 2b. Load regression head weights.
             head_w = {k[len("reg_head."):]: v
                       for k, v in loc_sd.items() if k.startswith("reg_head.")}
-            missing, unexpected = self.loc_head.load_state_dict(head_w, strict=False)
-            if missing:
-                print(f"[MultiTask] WARNING: localizer missing keys ({len(missing)}): {missing[:2]}")
+            if not head_w:
+                print("[MultiTask] WARNING: no reg_head keys in localizer.pth — loc_head is random!")
             else:
-                print("[MultiTask] Loaded localizer weights.")
+                missing_h, _ = self.loc_head.load_state_dict(head_w, strict=False)
+                if missing_h:
+                    print(f"[MultiTask] WARNING: loc_head missing {len(missing_h)} keys: {missing_h[:2]}")
+                else:
+                    print(f"[MultiTask] Loaded localizer weights ({len(head_w)} tensors).")
 
         # --- Step 3: unet → seg_encoder + decoder ---
         # seg_encoder is a dedicated VGG11Encoder for the segmentation path.
@@ -266,16 +287,17 @@ class MultiTaskPerceptionModel(nn.Module):
               'localization'   — [B, 4] (cx, cy, w, h) in pixel space
               'segmentation'   — [B, seg_classes, H, W] logits
         """
-        # Classification uses the shared (classifier) encoder
+        # Classification path — shared (classifier) encoder
         bottleneck, _ = self.encoder(x, return_features=True)
         pooled  = self.avgpool(bottleneck)
         cls_out = self.cls_head(pooled)          # [B, num_breeds]
 
-        # Localization uses the dedicated loc_encoder (fine-tuned block5)
-        # so reg_head sees the same feature distribution it was trained against
-        loc_bottleneck = self.loc_encoder(x)
-        loc_pooled = self.avgpool(loc_bottleneck)
-        loc_out = self.loc_head(loc_pooled)      # [B, 4] pixel space
+        # Localization path — dedicated loc_encoder (localizer BN running stats)
+        # Ensures loc_head receives features from the same distribution it was
+        # trained against; prevents BN mismatch → ReLU collapse → zero output
+        loc_feat    = self.loc_encoder(x)        # [B, 512, 7, 7]
+        loc_pooled  = self.avgpool(loc_feat)     # [B, 512, 7, 7]
+        loc_out     = self.loc_head(loc_pooled)  # [B, 4] pixel space
 
         # Segmentation uses the dedicated seg_encoder (UNet-adapted weights)
         # so the decoder skip connections see the feature distribution they
