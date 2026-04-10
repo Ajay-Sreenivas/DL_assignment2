@@ -98,10 +98,12 @@ class CombinedLocLoss(nn.Module):
     Default λ = 0.5 balances the two without heavy tuning.
     """
 
-    def __init__(self, lambda_l1: float = 0.5, eps: float = 1e-6):
+    def __init__(self, lambda_l1: float = 0.01, eps: float = 1e-6):
         """
         Args:
-            lambda_l1: Weight for the SmoothL1 term (default 0.5).
+            lambda_l1: Weight for the SmoothL1 term (default 0.01).
+                       Small value so SmoothL1 provides initialization
+                       gradient without dominating the IoU signal.
             eps:       Epsilon forwarded to IoULoss.
         """
         super().__init__()
@@ -117,15 +119,22 @@ class CombinedLocLoss(nn.Module):
         Returns:
             Scalar combined loss.
 
-        Note on scaling:
-            IoU loss is always in [0, 1].
-            SmoothL1 on raw pixel coords (0–224) produces values of 8–100+,
-            which would contribute 94 %+ of the gradient and effectively
-            switch off the IoU signal entirely.
-            Dividing both tensors by IMAGE_SIZE=224 normalises coordinates
-            to [0, 1] so both terms are balanced.
+        Gradient analysis:
+            IoU gradient = 0 when boxes do not overlap (early training).
+            SmoothL1 on raw pixel coords provides the ONLY gradient signal
+            during the initial phase when no overlap exists.
+
+            The /224 normalisation was tried but caused gradient collapse:
+            it reduced the SmoothL1 gradient to ~0.001 per coordinate,
+            making the model unable to learn (train_iou stuck at 0.07
+            after 30 epochs).
+
+            Correct approach: raw pixel SmoothL1 with a small lambda (0.01).
+            - Early training (no overlap): SmoothL1 gradient = 1.0 per coord.
+              Strong signal moves boxes toward targets even with zero IoU grad.
+            - Convergence (boxes overlapping): IoU contributes ~86% of the
+              gradient, SmoothL1 only ~14%, so IoU drives precise alignment.
         """
-        IMAGE_SIZE = 224.0
         iou = self.iou_loss(pred_boxes, target_boxes)
-        l1  = F.smooth_l1_loss(pred_boxes / IMAGE_SIZE, target_boxes / IMAGE_SIZE)
+        l1  = F.smooth_l1_loss(pred_boxes, target_boxes)
         return iou + self.lambda_l1 * l1
