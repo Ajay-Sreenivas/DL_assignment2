@@ -29,9 +29,6 @@ from models import (
 from losses.iou_loss import IoULoss, CombinedLocLoss
 
 
-# ---------------------------------------------------------------------------
-# Loss helpers
-# ---------------------------------------------------------------------------
 
 class DiceLoss(nn.Module):
     """Soft Dice loss for multi-class segmentation."""
@@ -62,9 +59,6 @@ class SegLoss(nn.Module):
         return self.ce(logits, targets) + self.dice(logits, targets)
 
 
-# ---------------------------------------------------------------------------
-# Metric helpers
-# ---------------------------------------------------------------------------
 
 def compute_iou(pred_boxes: torch.Tensor, target_boxes: torch.Tensor, eps: float = 1e-6):
     """Compute mean IoU for a batch of (cx, cy, w, h) boxes."""
@@ -99,9 +93,6 @@ def dice_score(logits: torch.Tensor, targets: torch.Tensor, num_classes: int = 3
     return total / num_classes
 
 
-# ---------------------------------------------------------------------------
-# Checkpoint persistence — upload to Google Drive from Kaggle
-# ---------------------------------------------------------------------------
 
 def save_to_drive(filename: str, folder_id: str = None):
     """Upload a checkpoint directly to Google Drive using the Drive API.
@@ -140,12 +131,9 @@ def save_to_drive(filename: str, folder_id: str = None):
         from oauth2client.service_account import ServiceAccountCredentials
 
         gauth = GoogleAuth()
-        # Use local webserver auth (works in Kaggle interactive sessions)
         gauth.LocalWebserverAuth()
         drive = GoogleDrive(gauth)
 
-        # Search for existing file with same name in the target folder so we
-        # overwrite rather than create duplicates on every best-checkpoint save.
         query = f"title='{filename}' and trashed=false"
         if folder_id:
             query += f" and '{folder_id}' in parents"
@@ -187,9 +175,9 @@ def copy_to_kaggle_output(filename: str):
             print(f"  --> Copied {filename} to /kaggle/working/ (output panel)")
 
 
-# ---------------------------------------------------------------------------
+
 # Training loops
-# ---------------------------------------------------------------------------
+
 
 def train_classifier(args, device):
     train_ds = OxfordIIITPetDataset(args.data_root, split="train")
@@ -207,7 +195,7 @@ def train_classifier(args, device):
     os.makedirs("checkpoints", exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
-        # --- Training ---
+        # Training 
         model.train()
         train_loss = 0.0; correct = 0; total = 0
         for batch in tqdm(train_dl, desc=f"[Classifier] Epoch {epoch}/{args.epochs} train", leave=False):
@@ -225,7 +213,7 @@ def train_classifier(args, device):
         train_loss /= total
         train_acc   = correct / total
 
-        # --- Validation ---
+        # Validation
         model.eval()
         val_loss = 0.0; val_correct = 0; val_total = 0
         all_preds = []; all_labels = []
@@ -246,7 +234,7 @@ def train_classifier(args, device):
         val_acc   = val_correct / val_total
         val_f1    = f1_score(all_labels, all_preds, average="macro", zero_division=0)
 
-        pass  # wandb.log disabled
+        pass
         print(f"[Classifier] Epoch {epoch}/{args.epochs} | train_loss={train_loss:.4f} train_acc={train_acc:.4f} | val_loss={val_loss:.4f} val_acc={val_acc:.4f} val_f1={val_f1:.4f}")
 
         if val_f1 > best_f1:
@@ -258,14 +246,7 @@ def train_classifier(args, device):
     print(f"Best classifier val_f1: {best_f1:.4f}")
 
 
-# ============================================================
-# PATCH for train.py
-#
-# 1. Replace the existing train_localizer() with this function.
-# 2. Update the import at the top of train.py:
-#      FROM: from losses.iou_loss import IoULoss
-#      TO:   from losses.iou_loss import IoULoss, CombinedLocLoss
-# ============================================================
+
 
 
 def _acc_at_iou(pred_boxes: "torch.Tensor",
@@ -311,8 +292,7 @@ def _acc_at_iou(pred_boxes: "torch.Tensor",
 
 
 def train_localizer(args, device):
-    # Only images that have a matching .xml annotation are used for training.
-    # Same base name: images/Abyssinian_1.jpg <-> annotations/xmls/Abyssinian_1.xml
+
     train_ds = OxfordIIITPetDataset(args.data_root, split="train", require_bbox=True)
     val_ds   = OxfordIIITPetDataset(args.data_root, split="val",   require_bbox=True)
     pin      = device.type == "cuda"
@@ -323,9 +303,7 @@ def train_localizer(args, device):
 
     model = VGG11Localizer(dropout_p=0.2).to(device)   # fixed at 0.2, not args.dropout_p
 
-    # ------------------------------------------------------------------
-    # Load pretrained encoder weights from classifier checkpoint.
-    # ------------------------------------------------------------------
+
     cls_ckpt_path = "checkpoints/classifier.pth"
     if os.path.exists(cls_ckpt_path):
         cls_sd = torch.load(cls_ckpt_path, map_location="cpu", weights_only=False)
@@ -344,10 +322,8 @@ def train_localizer(args, device):
     total       = sum(p.numel() for p in model.parameters())
     print(f"Encoder fully frozen — trainable: {trainable:,} / {total:,} (head only)")
 
-    # ------------------------------------------------------------------
-    # Loss: IoU + 0.5 x SmoothL1 (normalised by 224 so both terms ~[0,1])
-    # ------------------------------------------------------------------
-    loc_loss = CombinedLocLoss(lambda_l1=0.01)  # small lambda: SmoothL1 provides init gradient, IoU drives convergence
+
+    loc_loss = CombinedLocLoss(lambda_l1=0.01) 
 
     optimizer = optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -355,21 +331,19 @@ def train_localizer(args, device):
     )
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    # ------------------------------------------------------------------
-    # Save checkpoint based on Acc@IoU=0.5 — the exact Gradescope metric.
-    # ------------------------------------------------------------------
+
     best_val_acc = 0.0
     os.makedirs("checkpoints", exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
-        # --- Training ---
+        # Training
         model.train()
         train_loss = 0.0; train_iou_sum = 0.0; n = 0
         for batch in tqdm(train_dl, desc=f"[Localizer] Epoch {epoch}/{args.epochs} train", leave=False):
             imgs  = batch["image"].to(device)
-            boxes = batch["bbox"].to(device)          # [B, 4] pixel space
+            boxes = batch["bbox"].to(device)          
             optimizer.zero_grad()
-            pred  = model(imgs)                       # [B, 4] pixel space
+            pred  = model(imgs)                       
             loss  = loc_loss(pred, boxes)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
@@ -384,7 +358,7 @@ def train_localizer(args, device):
         train_loss /= n
         train_iou   = train_iou_sum / n
 
-        # --- Validation ---
+        # Validation
         model.eval()
         val_loss = 0.0; val_iou_sum = 0.0; val_acc_sum = 0.0; nv = 0
         with torch.no_grad():
@@ -400,16 +374,15 @@ def train_localizer(args, device):
                 nv          += bs
         val_loss /= nv
         val_iou   = val_iou_sum  / nv
-        val_acc   = val_acc_sum  / nv      # Acc@IoU=0.5 — the Gradescope metric
+        val_acc   = val_acc_sum  / nv      
 
-        pass  # wandb.log disabled
+        pass  
         print(
             f"[Localizer] Epoch {epoch}/{args.epochs} | "
             f"train_loss={train_loss:.4f} train_iou={train_iou:.4f} | "
             f"val_loss={val_loss:.4f} val_iou={val_iou:.4f} val_acc@0.5={val_acc:.4f}"
         )
 
-        # Save when Acc@IoU=0.5 improves — this is the exact Gradescope metric
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             torch.save(
@@ -467,7 +440,7 @@ def train_unet(args, device):
     os.makedirs("checkpoints", exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
-        # --- Training ---
+        # Training
         model.train()
         train_loss = 0.0; train_dice_sum = 0.0; n = 0
         for batch in tqdm(train_dl, desc=f"[UNet] Epoch {epoch}/{args.epochs} train", leave=False):
@@ -484,7 +457,7 @@ def train_unet(args, device):
         scheduler.step()
         train_loss /= n; train_dice = train_dice_sum / n
 
-        # --- Validation ---
+        # Validation
         model.eval()
         val_loss = 0.0; val_dice_sum = 0.0; nv = 0
         with torch.no_grad():
@@ -498,7 +471,7 @@ def train_unet(args, device):
                 nv           += imgs.size(0)
         val_loss /= nv; val_dice = val_dice_sum / nv
 
-        pass  # wandb.log disabled
+        pass  
         print(f"[UNet] Epoch {epoch}/{args.epochs} | train_loss={train_loss:.4f} train_dice={train_dice:.4f} | val_loss={val_loss:.4f} val_dice={val_dice:.4f}")
 
         if val_dice > best_dice:
@@ -536,7 +509,7 @@ def train_multitask(args, device):
     os.makedirs("checkpoints", exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
-        # --- Training ---
+        # Training
         model.train()
         metrics = {"cls_loss": 0, "loc_loss": 0, "seg_loss": 0, "total": 0, "n": 0}
         for batch in tqdm(train_dl, desc=f"[MultiTask] Epoch {epoch}/{args.epochs} train", leave=False):
@@ -560,10 +533,10 @@ def train_multitask(args, device):
             metrics["n"]        += bs
         scheduler.step()
         n = metrics["n"]
-        pass  # wandb.log disabled
+        pass  
         print(f"[MultiTask] Epoch {epoch}/{args.epochs} | total={metrics['total']/n:.4f}")
 
-        # --- Validation ---
+        # Validation 
         model.eval()
         val_acc = 0.0; val_iou = 0.0; val_dice = 0.0; nv = 0
         all_preds_mt = []; all_labels_mt = []
@@ -589,7 +562,7 @@ def train_multitask(args, device):
         val_f1    = f1_score(all_labels_mt, all_preds_mt, average="macro", zero_division=0)
         combined  = (val_f1 + val_iou + val_dice) / 3
 
-        pass  # wandb.log disabled
+        pass  
         print(f"  val_acc={val_acc:.4f} val_f1={val_f1:.4f} val_iou={val_iou:.4f} val_dice={val_dice:.4f}")
 
         if combined > best_combined:
@@ -599,9 +572,6 @@ def train_multitask(args, device):
             print(f"  --> Saved best model (combined={combined:.4f})")
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -625,8 +595,6 @@ if __name__ == "__main__":
     args   = parse_args()
     device = torch.device(args.device)
 
-    # wandb.init disabled
-
     if args.task == "all":
         train_classifier(args, device)
         copy_to_kaggle_output("classifier.pth")
@@ -648,5 +616,3 @@ if __name__ == "__main__":
     elif args.task == "multitask":
         train_multitask(args, device)
         copy_to_kaggle_output("multitask.pth")
-
-    # wandb.finish()  # disabled

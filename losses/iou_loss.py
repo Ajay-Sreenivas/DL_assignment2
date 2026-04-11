@@ -5,7 +5,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class IoULoss(nn.Module):
     """IoU loss for bounding box regression.
 

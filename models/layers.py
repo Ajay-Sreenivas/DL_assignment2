@@ -48,7 +48,6 @@ class CustomDropout(nn.Module):
         # Bernoulli mask: 1 with probability (1 - p), 0 with probability p
         keep_prob = 1.0 - self.p
         mask = torch.bernoulli(torch.full_like(x, keep_prob))
-        # Inverted dropout scaling so E[output] == x during training
         return x * mask / keep_prob
 
     def extra_repr(self) -> str:

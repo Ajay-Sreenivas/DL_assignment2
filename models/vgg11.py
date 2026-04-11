@@ -41,29 +41,29 @@ class VGG11Encoder(nn.Module):
             )
 
         # --- convolutional blocks (without pooling layers so we can grab skip maps) ---
-        self.block1 = conv_bn_relu(in_channels, 64)   # -> [B,64,224,224]
-        self.pool1  = nn.MaxPool2d(kernel_size=2, stride=2)  # -> [B,64,112,112]
+        self.block1 = conv_bn_relu(in_channels, 64)   
+        self.pool1  = nn.MaxPool2d(kernel_size=2, stride=2)  
 
-        self.block2 = conv_bn_relu(64, 128)            # -> [B,128,112,112]
-        self.pool2  = nn.MaxPool2d(kernel_size=2, stride=2)  # -> [B,128,56,56]
+        self.block2 = conv_bn_relu(64, 128)            
+        self.pool2  = nn.MaxPool2d(kernel_size=2, stride=2)  
 
         self.block3 = nn.Sequential(
             conv_bn_relu(128, 256),
             conv_bn_relu(256, 256),
-        )                                              # -> [B,256,56,56]
-        self.pool3  = nn.MaxPool2d(kernel_size=2, stride=2)  # -> [B,256,28,28]
+        )                                              
+        self.pool3  = nn.MaxPool2d(kernel_size=2, stride=2)  
 
         self.block4 = nn.Sequential(
             conv_bn_relu(256, 512),
             conv_bn_relu(512, 512),
-        )                                              # -> [B,512,28,28]
-        self.pool4  = nn.MaxPool2d(kernel_size=2, stride=2)  # -> [B,512,14,14]
+        )                                              
+        self.pool4  = nn.MaxPool2d(kernel_size=2, stride=2)  
 
         self.block5 = nn.Sequential(
             conv_bn_relu(512, 512),
             conv_bn_relu(512, 512),
-        )                                              # -> [B,512,14,14]
-        self.pool5  = nn.MaxPool2d(kernel_size=2, stride=2)  # -> [B,512,7,7]
+        )                                              
+        self.pool5  = nn.MaxPool2d(kernel_size=2, stride=2)  
 
     def forward(
         self, x: torch.Tensor, return_features: bool = False
@@ -79,28 +79,28 @@ class VGG11Encoder(nn.Module):
             - if return_features=True: (bottleneck, feature_dict) where feature_dict
               contains skip-connection tensors before each pooling step.
         """
-        s1 = self.block1(x)          # [B, 64, 224, 224]
-        x  = self.pool1(s1)          # [B, 64, 112, 112]
+        s1 = self.block1(x)          
+        x  = self.pool1(s1)          
 
-        s2 = self.block2(x)          # [B, 128, 112, 112]
-        x  = self.pool2(s2)          # [B, 128, 56, 56]
+        s2 = self.block2(x)          
+        x  = self.pool2(s2)          
 
-        s3 = self.block3(x)          # [B, 256, 56, 56]
-        x  = self.pool3(s3)          # [B, 256, 28, 28]
+        s3 = self.block3(x)          
+        x  = self.pool3(s3)          
 
-        s4 = self.block4(x)          # [B, 512, 28, 28]
-        x  = self.pool4(s4)          # [B, 512, 14, 14]
+        s4 = self.block4(x)          
+        x  = self.pool4(s4)          
 
-        s5 = self.block5(x)          # [B, 512, 14, 14]
-        bottleneck = self.pool5(s5)  # [B, 512, 7, 7]
+        s5 = self.block5(x)          
+        bottleneck = self.pool5(s5)  
 
         if return_features:
             features = {
-                "block1": s1,        # [B, 64, 224, 224]
-                "block2": s2,        # [B, 128, 112, 112]
-                "block3": s3,        # [B, 256, 56, 56]
-                "block4": s4,        # [B, 512, 28, 28]
-                "block5": s5,        # [B, 512, 14, 14]
+                "block1": s1,        
+                "block2": s2,        
+                "block3": s3,        
+                "block4": s4,        
+                "block5": s5,        
             }
             return bottleneck, features
 

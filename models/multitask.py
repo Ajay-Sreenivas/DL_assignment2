@@ -9,11 +9,9 @@ from .vgg11 import VGG11Encoder
 from .layers import CustomDropout
 
 
-# ── Google Drive checkpoint IDs ───────────────────────────────────────────────
 CLASSIFIER_DRIVE_ID = "128xX5UlMk5k_jzx5HQFzc9VopEl8DhCE"
 LOCALIZER_DRIVE_ID  = "1p-Ns0vBfOG5Mh0Oux0BpfTNXm5YTta_U"
 UNET_DRIVE_ID       = "1KD1DcLiMNEjrp9mZnQG_avIwnxY1pHUE"
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _double_conv(in_c: int, out_c: int) -> nn.Sequential:
@@ -66,7 +64,7 @@ class MultiTaskPerceptionModel(nn.Module):
     ):
         super().__init__()
 
-        # --- Download checkpoints from Google Drive (skip if already present) ---
+
         os.makedirs("checkpoints", exist_ok=True)
         for drive_id, out_path in [
             (CLASSIFIER_DRIVE_ID, classifier_path),
@@ -83,33 +81,16 @@ class MultiTaskPerceptionModel(nn.Module):
                     size_mb = os.path.getsize(out_path) / (1024 * 1024)
                     print(f"[MultiTask] Downloaded {os.path.basename(out_path)}: {size_mb:.1f}MB")
 
-        # --- Shared backbone (classification + localisation) ---
+
         self.encoder = VGG11Encoder(in_channels=in_channels)
         self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
 
-        # --- Segmentation encoder (separate from shared encoder) ---
-        # The UNet decoder was trained with an encoder that was fine-tuned
-        # for segmentation (not frozen during train_unet).  Its weights
-        # diverged from classifier.pth, so the decoder skip-connection
-        # features only match the UNet-adapted encoder.
-        # Solution: keep a dedicated seg_encoder loaded from unet.pth so
-        # the decoder always sees the features it was trained against,
-        # while self.encoder (from classifier.pth) serves cls + loc.
         self.seg_encoder = VGG11Encoder(in_channels=in_channels)
 
-        # --- Localization encoder ---
-        # PyTorch BatchNorm running_mean/running_var (buffers) are updated
-        # during every forward pass even when requires_grad=False (frozen).
-        # After localizer training, encoder BN running stats differ from
-        # classifier.pth.  loc_head was calibrated against LOCALIZER running
-        # stats.  Using classifier encoder (different stats) corrupts features:
-        # 25,088 slightly-wrong values aggregate through Linear(25088,1024),
-        # BN normalization shifts, ReLU saturates to zero, output=[0,0,0,0].
-        # loc_encoder carries the correct localizer BN running stats.
         self.loc_encoder = VGG11Encoder(in_channels=in_channels)
 
 
-        # --- Classification head ---
+        # Classification head
         self.cls_head = nn.Sequential(
             nn.Flatten(),
             nn.Linear(512 * 7 * 7, 4096),
@@ -123,9 +104,7 @@ class MultiTaskPerceptionModel(nn.Module):
             nn.Linear(4096, num_breeds),
         )
 
-        # --- Localisation head ---
-        # Matches VGG11Localizer.reg_head in localization.py exactly:
-        #   25088 → 1024 → 256 → 4, dropout_p=0.2
+        # Localisation head 
         self.loc_head = nn.Sequential(
             nn.Flatten(),
 
@@ -142,7 +121,7 @@ class MultiTaskPerceptionModel(nn.Module):
             nn.ReLU(),
         )
 
-        # --- Segmentation decoder ---
+        # Segmentation decoder
         self.bottleneck_drop = CustomDropout(p=0.5)
 
         self.up5  = nn.ConvTranspose2d(512, 512, kernel_size=2, stride=2)
@@ -162,12 +141,9 @@ class MultiTaskPerceptionModel(nn.Module):
 
         self.seg_out = nn.Conv2d(64, seg_classes, kernel_size=1)
 
-        # --- Load pre-trained weights ---
+        # Load pre-trained weights
         self._load_pretrained(classifier_path, localizer_path, unet_path)
 
-    # ------------------------------------------------------------------
-    # Weight loading helpers
-    # ------------------------------------------------------------------
 
     def _load_ckpt(self, path: str) -> dict:
         """Load a checkpoint, resolving relative paths from project root."""
@@ -203,16 +179,9 @@ class MultiTaskPerceptionModel(nn.Module):
             self.cls_head.load_state_dict(head_w, strict=False)
             print("[MultiTask] Loaded classifier weights.")
 
-        # --- Step 2: localizer → loc_encoder (BN running stats) + loc_head ---
-        # IMPORTANT: update LOCALIZER_DRIVE_ID above whenever you retrain
-        # and upload a new localizer.pth to Google Drive.
+        # Step 2: localizer → loc_encoder (BN running stats) + loc_head 
         loc_sd = self._load_ckpt(localizer_path)
         if loc_sd:
-            # 2a. Load localizer encoder into loc_encoder.
-            # This carries the correct BN running_mean/running_var that loc_head
-            # was calibrated against.  Without this, features fed to loc_head
-            # come from the classifier encoder (different running stats) and the
-            # BN normalization inside loc_head collapses predictions to zeros.
             loc_enc_w = {k[len("encoder."):]: v
                          for k, v in loc_sd.items() if k.startswith("encoder.")}
             if loc_enc_w:
@@ -236,12 +205,7 @@ class MultiTaskPerceptionModel(nn.Module):
                 else:
                     print(f"[MultiTask] Loaded localizer weights ({len(head_w)} tensors).")
 
-        # --- Step 3: unet → seg_encoder + decoder ---
-        # seg_encoder is a dedicated VGG11Encoder for the segmentation path.
-        # It is loaded with UNet-adapted weights so the decoder skip connections
-        # see exactly the same feature distribution they were trained against.
-        # self.encoder (classification encoder) is never touched here,
-        # preserving cls_head performance.
+        # Step 3: unet → seg_encoder + decoder
         unet_sd = self._load_ckpt(unet_path)
         if unet_sd:
             # 3a. Load UNet encoder into dedicated seg_encoder
@@ -272,10 +236,6 @@ class MultiTaskPerceptionModel(nn.Module):
                 self.seg_out.load_state_dict(final_w, strict=True)
                 print("[MultiTask] Loaded UNet weights.")
 
-    # ------------------------------------------------------------------
-    # Forward
-    # ------------------------------------------------------------------
-
     def forward(self, x: torch.Tensor):
         """Single forward pass yielding all three task outputs.
 
@@ -290,18 +250,12 @@ class MultiTaskPerceptionModel(nn.Module):
         # Classification path — shared (classifier) encoder
         bottleneck, _ = self.encoder(x, return_features=True)
         pooled  = self.avgpool(bottleneck)
-        cls_out = self.cls_head(pooled)          # [B, num_breeds]
+        cls_out = self.cls_head(pooled)          
 
-        # Localization path — dedicated loc_encoder (localizer BN running stats)
-        # Ensures loc_head receives features from the same distribution it was
-        # trained against; prevents BN mismatch → ReLU collapse → zero output
-        loc_feat    = self.loc_encoder(x)        # [B, 512, 7, 7]
-        loc_pooled  = self.avgpool(loc_feat)     # [B, 512, 7, 7]
-        loc_out     = self.loc_head(loc_pooled)  # [B, 4] pixel space
+        loc_feat    = self.loc_encoder(x)        
+        loc_pooled  = self.avgpool(loc_feat)     
+        loc_out     = self.loc_head(loc_pooled)  
 
-        # Segmentation uses the dedicated seg_encoder (UNet-adapted weights)
-        # so the decoder skip connections see the feature distribution they
-        # were trained against
         seg_bottleneck, skips = self.seg_encoder(x, return_features=True)
         b = self.bottleneck_drop(seg_bottleneck)
         d = self.up5(b);  d = self.dec5(torch.cat([d, skips["block5"]], dim=1))

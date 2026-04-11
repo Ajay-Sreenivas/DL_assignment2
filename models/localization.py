@@ -38,25 +38,21 @@ class VGG11Localizer(nn.Module):
         self.encoder = VGG11Encoder(in_channels=in_channels)
         self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
 
-        # ------------------------------------------------------------------
-        # Compact MLP regression head
-        # Input:  512 x 7 x 7 = 25,088 flattened features
-        # Output: 4 constrained values (cx, cy, w, h) in pixel space
-        # ------------------------------------------------------------------
+
         self.reg_head = nn.Sequential(
-            nn.Flatten(),                        # [B, 25088]
+            nn.Flatten(),                        
 
             nn.Linear(512 * 7 * 7, 1024),
             nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
-            CustomDropout(p=dropout_p),          # single dropout - light regularisation
+            CustomDropout(p=dropout_p),          
 
             nn.Linear(1024, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
 
             nn.Linear(256, 4),
-            nn.Sigmoid(),                        # Bounds output strictly to [0.0, 1.0]
+            nn.Sigmoid(),                        
         )
 
     def freeze_encoder(self) -> None:
@@ -77,9 +73,9 @@ class VGG11Localizer(nn.Module):
         Returns:
             Bounding box tensor [B, 4] in (cx, cy, w, h) pixel space.
         """
-        features = self.encoder(x)           # [B, 512, 7, 7]
-        features = self.avgpool(features)    # [B, 512, 7, 7]
-        out = self.reg_head(features)        # [B, 4] in [0, 1]
+        features = self.encoder(x)           
+        features = self.avgpool(features)    
+        out = self.reg_head(features)        
         
         # Scale to [0, 224] so the loss function and metrics interact with proper pixel coordinates
         return out * IMAGE_SIZE

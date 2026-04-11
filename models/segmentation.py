@@ -62,22 +62,21 @@ class VGG11UNet(nn.Module):
         self.bottleneck_drop = CustomDropout(p=dropout_p)
 
         # Decoder: transposed convolutions for learned upsampling
-        self.up5 = nn.ConvTranspose2d(512, 512, kernel_size=2, stride=2)   # 7→14
-        self.dec5 = _double_conv(512 + 512, 512)   # cat with s5 (512)
+        self.up5 = nn.ConvTranspose2d(512, 512, kernel_size=2, stride=2)   
+        self.dec5 = _double_conv(512 + 512, 512)   
 
-        self.up4 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)   # 14→28
-        self.dec4 = _double_conv(256 + 512, 256)   # cat with s4 (512)
+        self.up4 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)   
+        self.dec4 = _double_conv(256 + 512, 256)   
 
-        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)   # 28→56
-        self.dec3 = _double_conv(128 + 256, 128)   # cat with s3 (256)
+        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)   
+        self.dec3 = _double_conv(128 + 256, 128)   
 
-        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)    # 56→112
-        self.dec2 = _double_conv(64 + 128, 64)    # cat with s2 (128)
+        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)    
+        self.dec2 = _double_conv(64 + 128, 64)    
 
-        self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)     # 112→224
-        self.dec1 = _double_conv(64 + 64, 64)     # cat with s1 (64)
+        self.up1 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)     
+        self.dec1 = _double_conv(64 + 64, 64)     
 
-        # Final 1x1 projection to class logits
         self.out_conv = nn.Conv2d(64, num_classes, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -89,27 +88,23 @@ class VGG11UNet(nn.Module):
             Segmentation logits [B, num_classes, H, W].
         """
         bottleneck, skips = self.encoder(x, return_features=True)
-        # bottleneck: [B, 512, 7, 7]
-        # skips: block1=[B,64,224,224], block2=[B,128,112,112],
-        #        block3=[B,256,56,56],  block4=[B,512,28,28],
-        #        block5=[B,512,14,14]
 
-        b = self.bottleneck_drop(bottleneck)  # [B, 512, 7, 7]
+        b = self.bottleneck_drop(bottleneck)  
 
-        d = self.up5(b)                                        # [B, 512, 14, 14]
-        d = self.dec5(torch.cat([d, skips["block5"]], dim=1))  # [B, 512, 14, 14]
+        d = self.up5(b)                                        
+        d = self.dec5(torch.cat([d, skips["block5"]], dim=1))  
 
-        d = self.up4(d)                                        # [B, 256, 28, 28]
-        d = self.dec4(torch.cat([d, skips["block4"]], dim=1))  # [B, 256, 28, 28]
+        d = self.up4(d)                                        
+        d = self.dec4(torch.cat([d, skips["block4"]], dim=1))  
 
-        d = self.up3(d)                                        # [B, 128, 56, 56]
-        d = self.dec3(torch.cat([d, skips["block3"]], dim=1))  # [B, 128, 56, 56]
+        d = self.up3(d)                                        
+        d = self.dec3(torch.cat([d, skips["block3"]], dim=1))  
 
-        d = self.up2(d)                                        # [B, 64, 112, 112]
-        d = self.dec2(torch.cat([d, skips["block2"]], dim=1))  # [B, 64, 112, 112]
+        d = self.up2(d)                                        
+        d = self.dec2(torch.cat([d, skips["block2"]], dim=1))  
 
-        d = self.up1(d)                                        # [B, 64, 224, 224]
-        d = self.dec1(torch.cat([d, skips["block1"]], dim=1))  # [B, 64, 224, 224]
+        d = self.up1(d)                                        
+        d = self.dec1(torch.cat([d, skips["block1"]], dim=1))  
 
-        return self.out_conv(d)                                # [B, num_classes, 224, 224]
+        return self.out_conv(d)                                
     

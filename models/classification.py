@@ -35,10 +35,10 @@ class VGG11Classifier(nn.Module):
         self.encoder = VGG11Encoder(in_channels=in_channels)
 
         # Adaptive pool collapses any spatial size to 7x7 (same as VGG input 224x224)
-        self.avgpool = nn.AdaptiveAvgPool2d((7, 7))  # [B, 512, 7, 7]
+        self.avgpool = nn.AdaptiveAvgPool2d((7, 7))  
 
         self.classifier = nn.Sequential(
-            nn.Flatten(),                          # [B, 512*7*7 = 25088]
+            nn.Flatten(),                          
             nn.Linear(512 * 7 * 7, 4096),
             nn.BatchNorm1d(4096),
             nn.ReLU(inplace=True),
@@ -57,6 +57,6 @@ class VGG11Classifier(nn.Module):
         Returns:
             Classification logits [B, num_classes].
         """
-        features = self.encoder(x)           # [B, 512, 7, 7]
-        features = self.avgpool(features)    # [B, 512, 7, 7]
-        return self.classifier(features)     # [B, num_classes]
+        features = self.encoder(x)           
+        features = self.avgpool(features)    
+        return self.classifier(features)     
